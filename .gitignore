@@ -1,0 +1,16 @@
+node_modules/
+.pnpm/
+pnpm-lock.yaml
+dist/
+**/dist/
+.vscode/
+.DS_Store
+coverage/
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
