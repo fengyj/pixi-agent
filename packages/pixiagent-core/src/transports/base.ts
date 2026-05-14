@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ApiModes, InternalMessage, SessionMessage, UsageStats } from '../message';
+import { ApiModes, RawDeltaMessageType, RawLLMParametersType, RawMessageType, SessionMessage, UsageStats } from '../message';
 import { ToolDefinitionSchema } from '../tool';
 
 /**
@@ -11,8 +11,7 @@ import { ToolDefinitionSchema } from '../tool';
 export abstract class ProviderTransport<TRawMessage> {
   constructor(
     public apiMode: ApiModes,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    public dialectResolver?: DialectResolver<TRawMessage, any, any>,
+    public dialectResolver?: DialectResolver<TRawMessage, RawDeltaMessageType, RawLLMParametersType>,
   ) {}
 
   abstract convertFromRawMessage(rawMsg: TRawMessage): SessionMessage;
@@ -259,11 +258,9 @@ export class ApiModeResolverRegistry {
 }
 
 export class DialectResolverRegistry {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private readonly resolvers: DialectResolver<any, any, any>[] = [];
+  private readonly resolvers: DialectResolver<RawMessageType, RawDeltaMessageType, RawLLMParametersType>[] = [];
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  public registerResolver(resolver: DialectResolver<any, any, any>): this {
+  public registerResolver(resolver: DialectResolver<RawMessageType, RawDeltaMessageType, RawLLMParametersType>): this {
     this.resolvers.push(resolver);
     return this;
   }
@@ -275,11 +272,10 @@ export class DialectResolverRegistry {
    *                no need to specify the dialect.
    * @returns
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public resolveDialect(
     model: string,
     baseUrl: string,
-  ): DialectResolver<any, any, any> | undefined {
+  ): DialectResolver<RawMessageType, RawDeltaMessageType, RawLLMParametersType> | undefined {
     for (const resolver of this.resolvers) {
       if (resolver.match(model, baseUrl)) {
         return resolver;

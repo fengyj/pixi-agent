@@ -5,7 +5,7 @@ export type ToolCallOptions = {
   signal?: AbortSignal | undefined | null;
   timeout?: number;
   maxRetries?: number;
-  environment?: Record<string, any>; // optional environment variables to pass to the tool
+  environment?: Record<string, unknown>; // optional environment variables to pass to the tool
 };
 
 export const ToolDefinitionSchema = z.object({

@@ -15,7 +15,6 @@ import { ProviderTransport, ModelOptions, StreamCallbacks, DialectResolver, Mode
 import {
   ApiModes,
   SessionMessage,
-  InternalMessage,
   ContentPart,
   TextPart,
   ThinkingPart,

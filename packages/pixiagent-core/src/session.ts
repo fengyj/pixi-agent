@@ -1,6 +1,5 @@
-import z from 'zod';
+import { z } from 'zod';
 import {
-  SessionMessage,
   InternalMessage,
   RawMessageType,
   UsageStats,

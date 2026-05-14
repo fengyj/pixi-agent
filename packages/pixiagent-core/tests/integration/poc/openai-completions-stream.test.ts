@@ -1,7 +1,6 @@
 import { OpenAI } from 'openai';
-import { ChatCompletionFunctionTool, ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions';
+import type { ChatCompletionFunctionTool, ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions';
 import { executeToolCall, fakeToolset } from './tools';
-import { on } from 'events';
 
 const openai = new OpenAI({
   baseURL: 'https://api.ofox.ai/v1',
@@ -58,29 +57,31 @@ const messages = [
  * }
  * ```
  */
-let response = await openai.chat.completions.stream({
+await openai.chat.completions.stream({
   model: model,
   messages: messages,
   tools: tools,
   max_tokens: 500,
   prompt_cache_retention: 'in_memory',
 }).on('chunk', chunk=>{
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const delta = chunk.choices[0]?.delta as any
     if (delta?.reasoning_content)
         process.stdout.write(delta.reasoning_content);
 }).on('refusal.delta', chunk => {
     process.stderr.write(chunk.delta);
-}).on('refusal.done', chunk => {
+}).on('refusal.done', _chunk => {
     process.stderr.write('\n');
 }).on('content.delta', chunk => {
     process.stdout.write(chunk.delta);
-}).on('content.done', chunk => {
+}).on('content.done', _chunk => {
     process.stderr.write('\n');
 }).on('functionToolCall', toolCall => {
     process.stdout.write(`tool call: ${toolCall.name}, args: ${toolCall.arguments}\n`);
 }).on('finalMessage', message => {    
     messages.push(message);
 }).finalChatCompletion();
+process.stdout.write('\n');
 
 messages.push({
     role: 'user',
@@ -126,16 +127,17 @@ response = await openai.chat.completions.stream({
   tools: tools,
   max_tokens: 500,
 }).on('chunk', chunk=>{
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const delta = chunk.choices[0]?.delta as any
     if (delta?.reasoning_content)
         process.stdout.write(delta.reasoning_content);
 }).on('refusal.delta', chunk => {
     process.stderr.write(chunk.delta);
-}).on('refusal.done', chunk => {
+}).on('refusal.done', _chunk => {
     process.stderr.write('\n');
 }).on('content.delta', chunk => {
     process.stdout.write(chunk.delta);
-}).on('content.done', chunk => {
+}).on('content.done', _chunk => {
     process.stderr.write('\n');
 }).on('functionToolCall', toolCall => {
     process.stdout.write(`tool call: ${toolCall.name}, args: ${toolCall.arguments}\n`);
@@ -185,22 +187,23 @@ else {
  *   "model":""}
  * ```
  */
-response = await openai.chat.completions.stream({
+await openai.chat.completions.stream({
   model: model,
   messages: messages,
   tools: tools,
   max_tokens: 500,
 }).on('chunk', chunk=>{
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const delta = chunk.choices[0]?.delta as any
     if (delta?.reasoning_content)
         process.stdout.write(delta.reasoning_content);
 }).on('refusal.delta', chunk => {
     process.stderr.write(chunk.delta);
-}).on('refusal.done', chunk => {
+}).on('refusal.done', _chunk => {
     process.stderr.write('\n');
 }).on('content.delta', chunk => {
     process.stdout.write(chunk.delta);
-}).on('content.done', chunk => {
+}).on('content.done', _chunk => {
     process.stdout.write('\n');
 }).on('functionToolCall', toolCall => {
     process.stdout.write(`tool call: ${toolCall.name}, args: ${toolCall.arguments}\n`);

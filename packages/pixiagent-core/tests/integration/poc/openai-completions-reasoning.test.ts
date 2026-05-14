@@ -1,6 +1,5 @@
 import { OpenAI } from 'openai';
-import { ChatCompletionFunctionTool, ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions';
-import { executeToolCall, fakeToolset } from './tools';
+import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions';
 
 const openai = new OpenAI({
   baseURL: 'https://api.ofox.ai/v1',

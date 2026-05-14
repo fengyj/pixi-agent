@@ -1,8 +1,8 @@
 import { OpenAI } from 'openai';
-import { ChatCompletionFunctionTool, ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions';
+import type { ChatCompletionFunctionTool, ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions';
 import { XMLBuilder } from 'fast-xml-parser';
 import { z } from 'zod';
-import { executeToolCall, fakeToolset } from './tools';
+import { fakeToolset } from './tools';
 
 const userTextMessageSchema = z.object({
     content: z.string().min(1),
@@ -11,21 +11,23 @@ const userTextMessageSchema = z.object({
 type userTextMesssageType = z.infer<typeof userTextMessageSchema>;
 
 const genUserTextMessage = (data: userTextMesssageType): string => {
+  const validatedData = userTextMessageSchema.parse(data);
+
     const builder = new XMLBuilder({
         ignoreAttributes: false,
         format: false,
         suppressEmptyNode: true,
     });
-
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const xmlData: any = {
         message: {
             content: {
-                '#cdata': data.content,
+          '#cdata': validatedData.content,
             },
         },
     };
 
-    const metadataEntries = Object.entries(data.metadata ?? {});
+    const metadataEntries = Object.entries(validatedData.metadata ?? {});
     if (metadataEntries.length > 0) {
         xmlData.message.metadata = metadataEntries.map(([key, value]) => ({
             '@_name': key,
@@ -92,7 +94,7 @@ You MUSTN'T use this format to response.
       content: 'My name is Eric.', 
       metadata: {
         time: new Date().toISOString(),
-        msg_id: 
+        msg_id: '123456',
       }}),
   }
 ] as Array<ChatCompletionMessageParam>;

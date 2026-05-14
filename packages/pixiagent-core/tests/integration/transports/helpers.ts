@@ -11,11 +11,12 @@
 import { expect } from 'vitest';
 import {
   SessionMessage,
-  InternalMessage,
   ThinkingPart,
   ToolCallPart,
   ToolResultPart,
   TextPart,
+  RawMessageType,
+  UsageStats,
 } from '@pixiagent/core/message';
 import { ProviderTransport, ModelOptions, StreamCallbacks } from '@pixiagent/core/transports/base';
 import { fakeToolset, executeToolCall } from '../poc/tools';
@@ -80,12 +81,10 @@ export function makeCallbacks(): { callbacks: StreamCallbacks; collected: Collec
 
 // ── message history helpers ───────────────────────────────────────────────────
 
-export type RawMsg = Parameters<ProviderTransport<any>['convertToRawMessage']>[0];
-
 export function sessionMessagesToRawMessages(
-  transport: ProviderTransport<any>,
+  transport: ProviderTransport<RawMessageType>,
   messages: SessionMessage[],
-): RawMsg[] {
+): RawMessageType[] {
   return messages.map((msg) => transport.convertToRawMessage(msg));
 }
 
@@ -94,10 +93,10 @@ export function sessionMessagesToRawMessages(
  * ready to be appended to the conversation history.
  */
 export async function handleToolCalls(
-  transport: ProviderTransport<any>,
-  result: InternalMessage,
+  transport: ProviderTransport<RawMessageType>,
+  result: RawMessageType,
 ): Promise<SessionMessage[]> {
-  const sessionMsg = transport.convertFromRawMessage(result.rawMessage as any);
+  const sessionMsg = transport.convertFromRawMessage(result);
   const content = sessionMsg.content;
   if (!Array.isArray(content)) return [];
 
@@ -131,9 +130,9 @@ export async function handleToolCalls(
 
 // ── assertion helpers ─────────────────────────────────────────────────────────
 
-export function assertUsage(result: InternalMessage) {
-  expect(result.usage?.outputTokens, 'outputTokens should be > 0').toBeGreaterThan(0);
-  expect(result.usage?.inputTokens, 'inputTokens should be > 0').toBeGreaterThan(0);
+export function assertUsage(result: UsageStats | undefined) {
+  expect(result?.outputTokens, 'outputTokens should be > 0').toBeGreaterThan(0);
+  expect(result?.inputTokens, 'inputTokens should be > 0').toBeGreaterThan(0);
 }
 
 export function assertTextStreamed(collected: CollectedCallbacks) {
@@ -147,11 +146,11 @@ export function assertTextStreamed(collected: CollectedCallbacks) {
 
 export function assertTextDeltaMatchesFinalMessage(
   collected: CollectedCallbacks,
-  transport: ProviderTransport<any>,
-  result: InternalMessage,
+  transport: ProviderTransport<RawMessageType>,
+  result: RawMessageType,
 ) {
   const streamedText = collected.textChunks.join('');
-  const sessionMsg = transport.convertFromRawMessage(result.rawMessage as any);
+  const sessionMsg = transport.convertFromRawMessage(result);
   const content = sessionMsg.content;
 
   let finalText = '';
@@ -170,10 +169,11 @@ export function assertTextDeltaMatchesFinalMessage(
   ).toBe(finalText);
 }
 
-export function assertToolCallInResult(result: InternalMessage, transport: ProviderTransport<any>, expectedToolName: string) {
-  const sessionMsg = transport.convertFromRawMessage(result.rawMessage as any);
+export function assertToolCallInResult(result: RawMessageType, transport: ProviderTransport<RawMessageType>, expectedToolName: string) {
+  const sessionMsg = transport.convertFromRawMessage(result);
   const content = sessionMsg.content;
   expect(Array.isArray(content), 'assistant message content should be an array').toBe(true);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const toolCalls = (content as any[]).filter((p: any) => p.type === 'tool_call') as ToolCallPart[];
   expect(
     toolCalls.some((tc) => tc.name === expectedToolName),
@@ -197,13 +197,15 @@ export function assertThinkingStreamed(collected: CollectedCallbacks) {
 }
 
 export function assertThinkingInConvertedMessage(
-  transport: ProviderTransport<any>,
-  result: InternalMessage,
+  transport: ProviderTransport<RawMessageType>,
+  result: RawMessageType,
 ) {
-  const sessionMsg = transport.convertFromRawMessage(result.rawMessage as any);
+  const sessionMsg = transport.convertFromRawMessage(result);
   const content = sessionMsg.content;
   expect(Array.isArray(content), 'assistant message content should be an array').toBe(true);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const thinkingParts = (content as any[]).filter(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (p: any) => p.type === 'thinking',
   ) as ThinkingPart[];
   expect(
@@ -218,15 +220,17 @@ export function assertThinkingInConvertedMessage(
 
 export function assertThinkingDeltaMatchesFinalMessage(
   collected: CollectedCallbacks,
-  transport: ProviderTransport<any>,
-  result: InternalMessage,
+  transport: ProviderTransport<RawMessageType>,
+  result: RawMessageType,
 ) {
   const streamedThinking = collected.thinkingChunks.join('');
-  const sessionMsg = transport.convertFromRawMessage(result.rawMessage as any);
+  const sessionMsg = transport.convertFromRawMessage(result);
   const content = sessionMsg.content;
   expect(Array.isArray(content), 'assistant message content should be an array').toBe(true);
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const finalThinking = (content as any[])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     .filter((p: any): p is ThinkingPart => p.type === 'thinking')
     .map((p: ThinkingPart) => p.content)
     .join('');
@@ -249,7 +253,7 @@ export function assertThinkingDeltaMatchesFinalMessage(
  *   reasoningModel    – optionally a different model for Turn 4 (some dialects require it).
  */
 export async function runStandardConversation(
-  transport: ProviderTransport<any>,
+  transport: ProviderTransport<RawMessageType>,
   model: string,
   opts: {
     supportsReasoning?: boolean;
@@ -273,13 +277,13 @@ export async function runStandardConversation(
       callbacks,
     );
 
-    assertUsage(result);
+    assertUsage(result.usage);
     assertTextStreamed(collected);
-    assertTextDeltaMatchesFinalMessage(collected, transport, result);
+    assertTextDeltaMatchesFinalMessage(collected, transport, result.rawMessage);
 
     // push to history
     history.push(messages[messages.length - 1]);
-    history.push(transport.convertFromRawMessage(result.rawMessage as any));
+    history.push(transport.convertFromRawMessage(result.rawMessage));
   }
 
   // ── Turn 2: tool call – future_weather (no args) ─────────────────────────
@@ -298,14 +302,14 @@ export async function runStandardConversation(
       callbacks,
     );
 
-    assertUsage(result);
-    const toolCall = assertToolCallInResult(result, transport, 'future_weather');
+    assertUsage(result.usage);
+    assertToolCallInResult(result.rawMessage, transport, 'future_weather');
     expect(collected.errors).toHaveLength(0);
 
     // execute tool and continue conversation
-    const toolResults = await handleToolCalls(transport, result);
+    const toolResults = await handleToolCalls(transport, result.rawMessage);
     history.push(userMsg);
-    history.push(transport.convertFromRawMessage(result.rawMessage as any));
+    history.push(transport.convertFromRawMessage(result.rawMessage));
     history.push(...toolResults);
 
     // one more turn to get the summary
@@ -319,15 +323,15 @@ export async function runStandardConversation(
       sessionMessagesToRawMessages(transport, followUp),
       cb2,
     );
-    assertUsage(result2);
+    assertUsage(result2.usage)  ;
     assertTextStreamed(col2);
     history.push(followUp[followUp.length - 1]);
-    history.push(transport.convertFromRawMessage(result2.rawMessage as any));
+    history.push(transport.convertFromRawMessage(result2.rawMessage));
   }
 
   // ── Turn 3: tool call – stock_ohlc (with args) ───────────────────────────
   {
-    const { callbacks, collected } = makeCallbacks();
+    const { callbacks } = makeCallbacks();
     const userMsg: SessionMessage = {
       type: 'session_message',
       role: 'user',
@@ -341,15 +345,15 @@ export async function runStandardConversation(
       callbacks,
     );
 
-    assertUsage(result);
-    const toolCall = assertToolCallInResult(result, transport, 'stock_ohlc');
+    assertUsage(result.usage);
+    const toolCall = assertToolCallInResult(result.rawMessage, transport, 'stock_ohlc');
     const args = JSON.parse(toolCall.arguments || '{}');
     expect(args.ticker?.toUpperCase()).toBe('AAPL');
     expect(args.date).toBe('2024-01-15');
 
-    const toolResults = await handleToolCalls(transport, result);
+    const toolResults = await handleToolCalls(transport, result.rawMessage);
     history.push(userMsg);
-    history.push(transport.convertFromRawMessage(result.rawMessage as any));
+    history.push(transport.convertFromRawMessage(result.rawMessage));
     history.push(...toolResults);
 
     const { callbacks: cb2 } = makeCallbacks();
@@ -366,9 +370,9 @@ export async function runStandardConversation(
       sessionMessagesToRawMessages(transport, followUp),
       cb2,
     );
-    assertUsage(result2);
+    assertUsage(result2.usage);
     history.push(followUp[followUp.length - 1]);
-    history.push(transport.convertFromRawMessage(result2.rawMessage as any));
+    history.push(transport.convertFromRawMessage(result2.rawMessage));
   }
 
   // ── Turn 4: reasoning ────────────────────────────────────────────────────
@@ -388,11 +392,11 @@ export async function runStandardConversation(
       callbacks,
     );
 
-    assertUsage(result);
+    assertUsage(result.usage);
     assertTextStreamed(collected);
-    assertTextDeltaMatchesFinalMessage(collected, transport, result);
+    assertTextDeltaMatchesFinalMessage(collected, transport, result.rawMessage);
     assertThinkingStreamed(collected);
-    assertThinkingInConvertedMessage(transport, result);
-    assertThinkingDeltaMatchesFinalMessage(collected, transport, result);
+    assertThinkingInConvertedMessage(transport, result.rawMessage);
+    assertThinkingDeltaMatchesFinalMessage(collected, transport, result.rawMessage);
   }
 }

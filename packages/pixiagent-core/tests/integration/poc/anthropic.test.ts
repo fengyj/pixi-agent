@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { MessageParam, Tool } from '@anthropic-ai/sdk/resources';
-import { executeToolCall, fakeToolset } from './tools';
+import type { MessageParam, Tool } from '@anthropic-ai/sdk/resources/messages';
+import { fakeToolset } from './tools';
 
 const client = new Anthropic({
   baseURL: "https://api.ofox.ai/anthropic",
@@ -53,7 +53,7 @@ const messages = [{
 const response = await client.messages.stream({
   max_tokens: 1024,
   messages: messages,
-  model: 'anthropic/claude-haiku-4.5',
+  model: model,
   system: instructions,
   stream: true,
   thinking: {

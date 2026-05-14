@@ -1,34 +1,5 @@
 import { OpenAI } from 'openai';
-import { ChatCompletionFunctionTool, ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions';
-import { executeToolCall, fakeToolset } from './tools';
-import { ResponseInput, ResponseOutputItem } from 'openai/resources/responses/responses';
-
-const messageTypesAllowed = [
-    'message', // ResponseOutputMessage
-    'file_search_call', // ResponseFileSearchToolCall
-    'function_call', // ResponseFunctionToolCall
-    'function_call_output', // ResponseFunctionToolCallOutput
-    'web_search_call', // ResponseWebSearchToolCall
-    'computer_tool_call', // ResponseComputerToolCall
-    'computer_tool_call_output', // ResponseComputerToolCallOutputItem
-    'reasoning', // ResponseReasoningItem
-    'tool_search_call', // ResponseToolSearchCall
-    'tool_search_output', // ResponseToolSearchOutputItem
-    'image_generation_call', // ResponseOutputItem.ImageGenerationCall
-    'code_interpreter_tool_call', // ResponseCodeInterpreterToolCall
-    'local_shell_call', // ResponseOutputItem.LocalShellCall
-    'local_shell_call_output', // ResponseOutputItem.LocalShellCallOutput
-    'function_shell_call', // ResponseFunctionShellToolCall
-    'function_shell_call_output', // ResponseFunctionShellToolCallOutput
-    'apply_patch_tool_call', // ResponseApplyPatchToolCall
-    'apply_patch_tool_call_output', // ResponseApplyPatchToolCallOutput
-    'mcp_call', // ResponseOutputItem.McpCall
-    'mcp_list_tools', // ResponseOutputItem.McpListTools
-    'mcp_approval_request', // ResponseOutputItem.McpApprovalRequest
-    'mcp_approval_response', // ResponseOutputItem.McpApprovalResponse
-    'custom_tool_call', // ResponseCustomToolCall
-    'custom_tool_call_output', // ResponseCustomToolCallOutputItem
-]
+import type { ResponseInput } from 'openai/resources/responses/responses';
 
 const openai = new OpenAI({
   baseURL: 'https://api.ofox.ai/v1',
@@ -64,7 +35,7 @@ messages.push({
  *   "usage":{"prompt_tokens":435,"completion_tokens":500,"total_tokens":935}}
  * ```
  */
-let response = await openai.responses.create({
+const response = await openai.responses.create({
   model: model,
   instructions: instructions,
   input: messages,
@@ -74,3 +45,4 @@ let response = await openai.responses.create({
   max_output_tokens: 500,
   reasoning: { effort: 'medium' },
 });
+messages.push(response);

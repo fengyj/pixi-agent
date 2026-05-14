@@ -85,14 +85,12 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
         text: p.content,
         signature: p.signature ?? null,
       }));
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return { ...rawMsg, reasoning_details: reasoningDetails } as any;
+      return { ...rawMsg, reasoning_details: reasoningDetails } as ChatCompletionMessageParam;
     }
 
     // Plain text thinking — use the simpler `reasoning` string field.
     const reasoningText = thinkingParts.map((p) => p.content).join('');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return { ...rawMsg, reasoning: reasoningText } as any;
+    return { ...rawMsg, reasoning: reasoningText } as ChatCompletionMessageParam;
   }
 
   manipulateMessage(msg: SessionMessage, rawMsg: ChatCompletionMessageParam): SessionMessage {

@@ -26,7 +26,6 @@ import {
   DocumentPart,
   ToolResultPart,
   ContentPart,
-  InternalMessage,
   UsageStats,
 } from '../message';
 import { OpenAI } from 'openai/client';
@@ -453,8 +452,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
         const choice = chunk.choices[0];
         if (!choice) return;
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const delta = choice.delta as any;
+        const delta = choice.delta;
 
         // Handle thinking/reasoning content (provider-specific field, extracted via dialect)
         const reasoningDelta: string | null | undefined = this.dialectResolver?.extractFromDelta(

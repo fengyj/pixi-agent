@@ -9,7 +9,10 @@ const compat = new FlatCompat({
 
 module.exports = [
   {
-    ignores: ["node_modules/**", "dist/**"],
+    ignores: [
+      "node_modules/**", 
+      "dist/**"
+    ],
   },
   ...compat.config({
     extends: [

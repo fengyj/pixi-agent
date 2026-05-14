@@ -1,3 +1,11 @@
+import type { MessageParam, RawContentBlockDelta } from '@anthropic-ai/sdk/resources/messages';
+import type { MessageStreamParams } from '@anthropic-ai/sdk/resources/messages/messages';
+import type {
+  ChatCompletionChunk,
+  ChatCompletionMessageParam,
+  ChatCompletionStreamParams,
+} from 'openai/resources/chat/completions/completions';
+import type { ResponseInputItem } from 'openai/resources/responses/responses';
 import { z } from 'zod';
 
 export enum ApiModes {
@@ -21,14 +29,14 @@ export type UsageStats = {
 
 /**
  * The media source used in the message content.
- * 
- * The `file_id` sourceType is used for the media that has been uploaded to the server, 
+ *
+ * The `file_id` sourceType is used for the media that has been uploaded to the server,
  * and can be referenced by the fileId.
- * The `expireAt` field is optional, and is used to indicate the expiration time of the file. 
- * After the expiration time, the file will be deleted from the server 
+ * The `expireAt` field is optional, and is used to indicate the expiration time of the file.
+ * After the expiration time, the file will be deleted from the server
  * and can no longer be accessed by the fileId.
  * @todo we can support base64 and url source types first. They are easier to handle the expiration and provider change issues. For the file_id source type, we need to handle the expiration and provider change issues, which is more complex. So we can support it in the future after we have a better understanding of the requirements and constraints.
- * @todo for the source which type is 'file_id', handle the case when the file is expired 
+ * @todo for the source which type is 'file_id', handle the case when the file is expired
  * or the provider is changed, needs to reupload the file, and replace the fileId in all references in the whole history.
  */
 export const MediaSourceSchema = z.union([
@@ -70,7 +78,7 @@ export const ThinkingPartSchema = z.object({
 
 export type ThinkingPart = z.infer<typeof ThinkingPartSchema>;
 
-export const RefusalPartSchema = z.object({ 
+export const RefusalPartSchema = z.object({
   type: z.literal('refusal'),
   reason: z.string(),
 });
@@ -193,17 +201,19 @@ export const SessionMessageSchema = z.object({
 
 export type SessionMessage = z.infer<typeof SessionMessageSchema>;
 
-export type RawMessageType = import('openai/resources/chat/completions/completions').ChatCompletionMessageParam
-    | import('openai/resources/responses/responses').ResponseInputItem
-    | import('@anthropic-ai/sdk/resources/messages/messages').MessageParam;
+export type RawMessageType = ChatCompletionMessageParam | ResponseInputItem | MessageParam;
+
+export type RawDeltaMessageType = ChatCompletionChunk.Choice.Delta | RawContentBlockDelta;
+
+export type RawLLMParametersType = MessageStreamParams | ChatCompletionStreamParams;
 
 /**
  * The structure used for persistence.
- * 
+ *
  * We store the raw message from the API directly. If the API mode or the dialect isn't changed in the next turn,
  * the raw message can be used directly as the input. This can help us avoid the information loss during the conversion between different API modes or dialects.
- * If the API mode or the dialect is changed in the next turn, the old messages will be converted to the SessionMessage and 
- * then converted to the new raw format of the new model. Because users rarely change the model during the conversation, 
+ * If the API mode or the dialect is changed in the next turn, the old messages will be converted to the SessionMessage and
+ * then converted to the new raw format of the new model. Because users rarely change the model during the conversation,
  * so I think it's better then saving the messages in SessionMessage format.
  */
 export type InternalMessage = {

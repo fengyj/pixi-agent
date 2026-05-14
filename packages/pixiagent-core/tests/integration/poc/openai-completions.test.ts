@@ -1,5 +1,5 @@
 import { OpenAI } from 'openai';
-import { ChatCompletionFunctionTool, ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions';
+import type { ChatCompletionFunctionTool, ChatCompletionMessageParam } from 'openai/resources/chat/completions/completions';
 import { executeToolCall, fakeToolset } from './tools';
 
 const openai = new OpenAI({

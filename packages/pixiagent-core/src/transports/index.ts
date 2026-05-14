@@ -1,4 +1,4 @@
-import { ApiModes } from '../message';
+import { ApiModes, RawMessageType } from '../message';
 import {
   ProviderTransport,
   DialectResolver,
@@ -21,7 +21,7 @@ export const Transport = {
     apiKey?: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     dialectResolver?: DialectResolver<any, any, any>,
-  ): ProviderTransport<any> {
+  ): ProviderTransport<RawMessageType> {
     switch (apiMode) {
       case ApiModes.COMPLETIONS:
         return new ChatCompletionTransport(baseUrl, apiKey, dialectResolver);

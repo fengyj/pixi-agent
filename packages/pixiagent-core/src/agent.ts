@@ -9,16 +9,15 @@
  *
  */
 
-import z, { string } from 'zod';
 import { SessionThread, PendingMessage } from './session';
 import { Transport, ProviderTransport, ModelOptions } from './transports';
-import { ContentPart, SessionMessage, ToolCallPart, ToolResultPart } from './message';
+import { ContentPart, RawMessageType, SessionMessage, ToolCallPart, ToolResultPart } from './message';
 import { ToolRegistry } from './tool';
 
 export class PixiAgent {
-  private _transport: ProviderTransport<any>;
-  private convertedMessagesCache = new Map<string, any>();
-  private transportCache = new Map<string, ProviderTransport<any>>();
+  private _transport: ProviderTransport<RawMessageType>;
+  private convertedMessagesCache = new Map<string, RawMessageType>();
+  private transportCache = new Map<string, ProviderTransport<RawMessageType>>();
   // todo: add event listener as parameter to expose the events.
   constructor(
     public sessionThread: SessionThread,
@@ -161,13 +160,13 @@ export class PixiAgent {
    * @param modelOptions
    * @returns
    */
-  private getHistoryMessagesForTransport(modelOptions: ModelOptions): any[] {
-    const messages = [] as any[];
+  private getHistoryMessagesForTransport(modelOptions: ModelOptions): RawMessageType[] {
+    const messages = [] as RawMessageType[];
     const transport = this.getTransport(modelOptions);
     for (const msg of this.sessionThread.threadMessages) {
       if (modelOptions.apiMode !== msg.apiMode || modelOptions.baseUrl !== msg.baseUrl) {
         if (this.convertedMessagesCache.has(msg.internalMessageId)) {
-          messages.push(this.convertedMessagesCache.get(msg.internalMessageId));
+          messages.push(this.convertedMessagesCache.get(msg.internalMessageId)!);
           continue;
         }
         const tKey = `${msg.apiMode}-${msg.baseUrl ?? ''}`;
@@ -191,7 +190,7 @@ export class PixiAgent {
     return messages;
   }
 
-  private getTransport(options: ModelOptions): ProviderTransport<any> {
+  private getTransport(options: ModelOptions): ProviderTransport<RawMessageType> {
     if (
       this.sessionThread.threadInfo.modelOptions.apiMode !== options.apiMode ||
       this.sessionThread.threadInfo.modelOptions.baseUrl !== options.baseUrl
@@ -266,8 +265,8 @@ export class PixiAgent {
 
   private static getTransport(
     modelOptions: ModelOptions,
-    transport?: ProviderTransport<any>,
-  ): ProviderTransport<any> {
+    transport?: ProviderTransport<RawMessageType>,
+  ): ProviderTransport<RawMessageType> {
     const dialectResolver = modelOptions.baseUrl
       ? Transport.GlobalDialectResolverRegistry.resolveDialect(
           modelOptions.model,
