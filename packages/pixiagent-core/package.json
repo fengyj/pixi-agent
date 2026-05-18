@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -b",
     "lint": "eslint . --ext .ts",
-    "test": "pnpm run test:unit",
+    "test": "bun run test:unit",
     "test:unit": "vitest run --config ../../vitest.config.ts",
     "test:browser-unit": "vitest run --config ../../vitest.browser-unit.config.ts",
     "test:integration": "vitest run --config ../../vitest.integration.config.ts"

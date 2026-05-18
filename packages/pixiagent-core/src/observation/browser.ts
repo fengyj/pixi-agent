@@ -22,10 +22,10 @@
  * Install only the groups you need:
  *
  *   Log export (`transport !== 'none'`):
- *     pnpm add @opentelemetry/api-logs @opentelemetry/sdk-logs @opentelemetry/exporter-logs-otlp-http
+ *     bun add @opentelemetry/api-logs @opentelemetry/sdk-logs @opentelemetry/exporter-logs-otlp-http
  *
  *   Tracing + Metrics (`enableTelemetry: true`):
- *     pnpm add @opentelemetry/sdk-trace-web @opentelemetry/sdk-trace-base
+ *     bun add @opentelemetry/sdk-trace-web @opentelemetry/sdk-trace-base
  *             @opentelemetry/sdk-metrics
  *             @opentelemetry/exporter-trace-otlp-http
  *             @opentelemetry/exporter-metrics-otlp-http

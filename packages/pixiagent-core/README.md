@@ -17,7 +17,7 @@ The Pixi Agent Core package provides the base agent framework for the monorepo.
 Run from the repository root:
 
 ```bash
-pnpm install
-pnpm test
-pnpm build
+bun install
+bun workspaces run test:unit
+bun workspaces run build
 ```

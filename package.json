@@ -2,19 +2,19 @@
   "name": "pixiagent",
   "private": true,
   "version": "0.1.0",
-  "description": "A TypeScript pnpm monorepo for the Pixi agent system.",
-  "packageManager": "pnpm@10.33.0",
+  "description": "A TypeScript Bun monorepo for the Pixi agent system.",
+  "packageManager": "bun@1",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "bootstrap": "pnpm install",
-    "build": "pnpm -r run build",
-    "lint": "pnpm -r run lint",
-    "test": "pnpm -r run test:unit",
-    "test:unit": "pnpm -r run test:unit",
-    "test:integration": "pnpm -r run test:integration",
-    "test:all": "pnpm -r run test:unit && pnpm -r run test:integration",
+    "bootstrap": "bun install",
+    "build": "bun workspaces run build",
+    "lint": "bun workspaces run lint",
+    "test": "bun workspaces run test:unit",
+    "test:unit": "bun workspaces run test:unit",
+    "test:integration": "bun workspaces run test:integration",
+    "test:all": "bun workspaces run test:unit && bun workspaces run test:integration",
     "format": "prettier --write ."
   },
   "devDependencies": {

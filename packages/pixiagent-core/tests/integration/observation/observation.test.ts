@@ -15,7 +15,7 @@
  *     pino JSON output, not on collector acknowledgement.
  *
  * Running:
- *   pnpm --filter @pixiagent/core test:integration \
+ *   bun workspaces run test:integration --filter @pixiagent/core \
  *     -- --testPathPattern observation
  */
 

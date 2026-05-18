@@ -8,7 +8,7 @@ import { defineConfig } from 'vitest/config';
  * matching the same module that bundlers (Vite, webpack, esbuild) pick in real apps.
  *
  * Run:
- *   pnpm --filter @pixiagent/core test:browser-unit
+ *   bun workspaces run test:browser-unit --filter @pixiagent/core
  */
 export default defineConfig({
   resolve: {
