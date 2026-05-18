@@ -279,11 +279,11 @@ export async function runStandardConversation(
 
     assertUsage(result.usage);
     assertTextStreamed(collected);
-    assertTextDeltaMatchesFinalMessage(collected, transport, result.rawMessage);
+    assertTextDeltaMatchesFinalMessage(collected, transport, result.responseMessage);
 
     // push to history
     history.push(messages[messages.length - 1]);
-    history.push(transport.convertFromRawMessage(result.rawMessage));
+    history.push(transport.convertFromRawMessage(result.responseMessage));
   }
 
   // ── Turn 2: tool call – future_weather (no args) ─────────────────────────
@@ -303,13 +303,13 @@ export async function runStandardConversation(
     );
 
     assertUsage(result.usage);
-    assertToolCallInResult(result.rawMessage, transport, 'future_weather');
+    assertToolCallInResult(result.responseMessage, transport, 'future_weather');
     expect(collected.errors).toHaveLength(0);
 
     // execute tool and continue conversation
-    const toolResults = await handleToolCalls(transport, result.rawMessage);
+    const toolResults = await handleToolCalls(transport, result.responseMessage);
     history.push(userMsg);
-    history.push(transport.convertFromRawMessage(result.rawMessage));
+    history.push(transport.convertFromRawMessage(result.responseMessage));
     history.push(...toolResults);
 
     // one more turn to get the summary
@@ -326,7 +326,7 @@ export async function runStandardConversation(
     assertUsage(result2.usage)  ;
     assertTextStreamed(col2);
     history.push(followUp[followUp.length - 1]);
-    history.push(transport.convertFromRawMessage(result2.rawMessage));
+    history.push(transport.convertFromRawMessage(result2.responseMessage));
   }
 
   // ── Turn 3: tool call – stock_ohlc (with args) ───────────────────────────
@@ -346,14 +346,14 @@ export async function runStandardConversation(
     );
 
     assertUsage(result.usage);
-    const toolCall = assertToolCallInResult(result.rawMessage, transport, 'stock_ohlc');
+    const toolCall = assertToolCallInResult(result.responseMessage, transport, 'stock_ohlc');
     const args = JSON.parse(toolCall.arguments || '{}');
     expect(args.ticker?.toUpperCase()).toBe('AAPL');
     expect(args.date).toBe('2024-01-15');
 
-    const toolResults = await handleToolCalls(transport, result.rawMessage);
+    const toolResults = await handleToolCalls(transport, result.responseMessage);
     history.push(userMsg);
-    history.push(transport.convertFromRawMessage(result.rawMessage));
+    history.push(transport.convertFromRawMessage(result.responseMessage));
     history.push(...toolResults);
 
     const { callbacks: cb2 } = makeCallbacks();
@@ -372,7 +372,7 @@ export async function runStandardConversation(
     );
     assertUsage(result2.usage);
     history.push(followUp[followUp.length - 1]);
-    history.push(transport.convertFromRawMessage(result2.rawMessage));
+    history.push(transport.convertFromRawMessage(result2.responseMessage));
   }
 
   // ── Turn 4: reasoning ────────────────────────────────────────────────────
@@ -394,9 +394,9 @@ export async function runStandardConversation(
 
     assertUsage(result.usage);
     assertTextStreamed(collected);
-    assertTextDeltaMatchesFinalMessage(collected, transport, result.rawMessage);
+    assertTextDeltaMatchesFinalMessage(collected, transport, result.responseMessage);
     assertThinkingStreamed(collected);
-    assertThinkingInConvertedMessage(transport, result.rawMessage);
-    assertThinkingDeltaMatchesFinalMessage(collected, transport, result.rawMessage);
+    assertThinkingInConvertedMessage(transport, result.responseMessage);
+    assertThinkingDeltaMatchesFinalMessage(collected, transport, result.responseMessage);
   }
 }

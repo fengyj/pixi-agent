@@ -219,7 +219,7 @@ function buildDefaultTransportTargets(
   serviceName: string,
   serviceVersion: string,
   transport: 'grpc' | 'http' | 'none',
-  endpoint: string,
+  endpoint?: string,
 ): LoggerTransportTarget[] {
   const targets: LoggerTransportTarget[] = [];
 
@@ -228,7 +228,10 @@ function buildDefaultTransportTargets(
   }
 
   if (outputToOtel && transport !== 'none') {
-    targets.push(buildOtelTransportTarget(serviceName, serviceVersion, transport, endpoint));
+    if (!endpoint) {
+      throw new Error(`[observation] transportEndpoint is required for OTLP log transport when transport is '${transport}'.`); // should be caught by TypeScript but added here for runtime safety
+    }
+    targets.push(buildOtelTransportTarget(serviceName, serviceVersion, transport, endpoint!));
   }
 
   if (targets.length === 0) {
@@ -482,14 +485,14 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
     const {
       transport,
       transportEndpoint,
-      enableTelemetry = false,
+      enableTelemetry = transport !== 'none',
       metricExportIntervalMs = 30_000,
       logging,
     } = options;
 
-    const resolvedEndpoint =
-      transportEndpoint ??
-      (transport === 'grpc' ? 'localhost:9937' : 'http://localhost:9938');
+    if (transport !== 'none' && !transportEndpoint) {
+      throw new Error(`[observation] transportEndpoint is required when transport is '${transport}'.`); // should be caught by TypeScript but added here for runtime safety
+    }
 
     // Resolve service identity (used for NodeSDK resource and OTel log transport).
     let serviceName = DEFAULT_SERVICE_NAME;
@@ -513,7 +516,7 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
         serviceName,
         serviceVersion,
         transport,
-        resolvedEndpoint,
+        transportEndpoint!,
       );
     }
 
@@ -524,10 +527,10 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
     if (enableTelemetry && transport !== 'none') {
       const url =
         transport === 'grpc'
-          ? resolvedEndpoint.startsWith('http')
-            ? resolvedEndpoint
-            : `http://${resolvedEndpoint}`
-          : resolvedEndpoint;
+          ? transportEndpoint!.startsWith('http')
+            ? transportEndpoint!
+            : `http://${transportEndpoint!}`
+          : transportEndpoint!;
 
       const [
         { NodeSDK: NodeSDKClass },
@@ -585,7 +588,7 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
         serviceName,
         serviceVersion,
         transport,
-        resolvedEndpoint,
+        transportEndpoint,
       );
       _rootLogger = pino({
         ...defaultLogOptions,

@@ -1,4 +1,11 @@
-import { DialectResolver, ModelOptions, ModelRequestOptions, ProviderTransport, StreamCallbacks } from './base';
+import {
+  DialectResolver,
+  ModelOptions,
+  ModelRequestOptions,
+  ModelResponse,
+  ProviderTransport,
+  StreamCallbacks,
+} from './base';
 import type {
   ChatCompletionUserMessageParam,
   ChatCompletionAssistantMessageParam,
@@ -14,6 +21,7 @@ import type {
   ChatCompletionStreamParams,
   ChatCompletionChunk,
   ChatCompletionReasoningEffort,
+  ChatCompletion,
 } from 'openai/resources/chat/completions';
 import {
   ApiModes,
@@ -28,6 +36,7 @@ import {
   ContentPart,
   UsageStats,
 } from '../message';
+import { InvalidMessageError } from '../errors';
 import { OpenAI } from 'openai/client';
 
 export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMessageParam> {
@@ -39,7 +48,8 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     dialectResolver?: DialectResolver<
       ChatCompletionMessageParam,
       ChatCompletionChunk.Choice.Delta,
-      ChatCompletionStreamParams
+      ChatCompletionStreamParams,
+      ChatCompletion
     >,
   ) {
     super(ApiModes.COMPLETIONS, dialectResolver);
@@ -187,7 +197,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
 
   private getFromToolMessageParam(msg: ChatCompletionToolMessageParam): SessionMessage {
     if (!msg.content || (typeof msg.content !== 'string' && msg.content.length === 0)) {
-      throw new Error('Tool message must have content');
+      throw new InvalidMessageError('Tool message must have content');
     }
 
     const toolResultParts = [] as ToolResultPart[];
@@ -249,7 +259,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
         case 'function':
           return this.getFromFunctionMessageParam(rawMsg as ChatCompletionFunctionMessageParam);
         default:
-          throw new Error(`Unsupported message role: ${rawMsg.role}`);
+          throw new InvalidMessageError(`Unsupported message role: ${rawMsg.role}`);
       }
     })();
     return this.dialectResolver ? this.dialectResolver.manipulateMessage(message, rawMsg) : message;
@@ -257,7 +267,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
 
   private getAssistantMessageParam(msg: SessionMessage): ChatCompletionAssistantMessageParam {
     if (msg.role !== 'assistant') {
-      throw new Error(`Message role must be assistant, but got ${msg.role}`);
+      throw new InvalidMessageError(`Message role must be assistant, but got ${msg.role}`);
     }
 
     const toolCalls =
@@ -316,10 +326,10 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
 
   private getUserMessageParam(msg: SessionMessage): ChatCompletionUserMessageParam {
     if (msg.role !== 'user') {
-      throw new Error(`Message role must be user, but got ${msg.role}`);
+      throw new InvalidMessageError(`Message role must be user, but got ${msg.role}`);
     }
     if (!msg.content || (typeof msg.content !== 'string' && msg.content.length === 0)) {
-      throw new Error('User message must have content');
+      throw new InvalidMessageError('User message must have content');
     }
 
     if (typeof msg.content === 'string') {
@@ -395,11 +405,11 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
 
   private getToolMessageParam(msg: SessionMessage): ChatCompletionToolMessageParam {
     if (msg.role !== 'tool') {
-      throw new Error(`Message role must be tool, but got ${msg.role}`);
+      throw new InvalidMessageError(`Message role must be tool, but got ${msg.role}`);
     }
 
     if (!msg.content || typeof msg.content === 'string' || msg.content.length === 0) {
-      throw new Error('Tool message content must be a non-empty array of content parts.');
+      throw new InvalidMessageError('Tool message content must be a non-empty array of content parts.');
     }
 
     const toolResults = msg.content
@@ -407,7 +417,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
       .map((part) => part as ToolResultPart);
 
     if (toolResults.length !== 1) {
-      throw new Error('Tool message content must have exactly one tool result part.');
+      throw new InvalidMessageError('Tool message content must have exactly one tool result part.');
     }
 
     const toolResult = toolResults[0];
@@ -428,7 +438,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
         case 'tool':
           return this.getToolMessageParam(msg);
         default:
-          throw new Error(`Unsupported message role: ${msg.role}`);
+          throw new InvalidMessageError(`Unsupported message role: ${msg.role}`);
       }
     })();
     return this.dialectResolver ? this.dialectResolver.manipulateRawMessage(rawMsg, msg) : rawMsg;
@@ -439,7 +449,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     messages: Array<ChatCompletionMessageParam>,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<{ rawMessageId: string; rawMessage: ChatCompletionMessageParam; usage?: UsageStats }> {
+  ): Promise<ModelResponse<ChatCompletionMessageParam>> {
     const params = this.getChatCompletionStreamParams(options, messages);
 
     let textChunkStarted = false;
@@ -523,13 +533,25 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
       .finalChatCompletion();
 
     return {
-      rawMessageId: response.id,
-      rawMessage: response.choices[0].message as ChatCompletionMessageParam,
+      responseId: response.id,
+      responseMessage: response.choices[0].message as ChatCompletionMessageParam,
+      responseModel: response.model,
       usage: response.usage
         ? {
             inputTokens: response.usage.prompt_tokens,
             outputTokens: response.usage.completion_tokens,
             totalTokens: response.usage.total_tokens,
+            reasoningTokens:
+              this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ??
+              response.usage.completion_tokens_details?.reasoning_tokens ??
+              undefined,
+            cacheReadTokens:
+              this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
+              response.usage.prompt_tokens_details?.cached_tokens ??
+              undefined,
+            cacheCreatedTokens:
+              this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
+              undefined,
             inputTokenDetails: response.usage.prompt_tokens_details
               ? { ...response.usage.prompt_tokens_details }
               : undefined,
@@ -538,6 +560,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
               : undefined,
           }
         : undefined,
+      stopReason: response.choices[0].finish_reason,
     };
   }
 
@@ -604,6 +627,8 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
       })),
     };
 
-    return this.dialectResolver ? this.dialectResolver.manipulateOptions(options, params) : params;
+    return this.dialectResolver
+      ? (this.dialectResolver.manipulateOptions(options, params) as ChatCompletionStreamParams)
+      : params;
   }
 }

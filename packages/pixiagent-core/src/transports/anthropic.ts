@@ -10,8 +10,15 @@ import type {
   ThinkingBlockParam,
   RawContentBlockDelta,
 } from '@anthropic-ai/sdk/resources/messages';
-import type { MessageStreamParams } from '@anthropic-ai/sdk/resources/messages/messages';
-import { ProviderTransport, ModelOptions, StreamCallbacks, DialectResolver, ModelRequestOptions } from './base';
+import type { Message, MessageStreamParams } from '@anthropic-ai/sdk/resources/messages/messages';
+import {
+  ProviderTransport,
+  ModelOptions,
+  StreamCallbacks,
+  DialectResolver,
+  ModelRequestOptions,
+  ModelResponse,
+} from './base';
 import {
   ApiModes,
   SessionMessage,
@@ -24,6 +31,7 @@ import {
   DocumentPart,
   UsageStats,
 } from '../message';
+import { InvalidMessageError } from '../errors';
 
 export class AnthropicTransport extends ProviderTransport<MessageParam> {
   readonly client: Anthropic;
@@ -31,7 +39,12 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
   constructor(
     baseUrl?: string,
     apiKey?: string,
-    dialectResolver?: DialectResolver<MessageParam, RawContentBlockDelta, MessageStreamParams>,
+    dialectResolver?: DialectResolver<
+      MessageParam,
+      RawContentBlockDelta,
+      MessageStreamParams,
+      Message
+    >,
   ) {
     super(ApiModes.ANTHROPIC, dialectResolver);
     this.client = new Anthropic({ baseURL: baseUrl, apiKey });
@@ -141,7 +154,7 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
         case 'user':
           return this.getFromUserMessageParam(rawMsg);
         default:
-          throw new Error(`Unsupported message role: ${rawMsg.role}`);
+          throw new InvalidMessageError(`Unsupported message role: ${rawMsg.role}`);
       }
     })();
     return this.dialectResolver ? this.dialectResolver.manipulateMessage(msg, rawMsg) : msg;
@@ -178,7 +191,7 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
 
   private getUserMessageParam(msg: SessionMessage): MessageParam {
     if (!msg.content || (typeof msg.content !== 'string' && msg.content.length === 0)) {
-      throw new Error('User message must have non-empty content.');
+      throw new InvalidMessageError('User message must have non-empty content.');
     }
     if (typeof msg.content === 'string') return { role: 'user', content: msg.content };
     const blocks: (TextBlockParam | ImageBlockParam | DocumentBlockParam)[] = [];
@@ -224,7 +237,9 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
 
   private getToolMessageParam(msg: SessionMessage): MessageParam {
     if (!msg.content || typeof msg.content === 'string' || msg.content.length === 0) {
-      throw new Error('Tool message content must be a non-empty array of content parts.');
+      throw new InvalidMessageError(
+        'Tool message content must be a non-empty array of content parts.',
+      );
     }
     const blocks: ToolResultBlockParam[] = msg.content
       .filter((p) => p.type === 'tool_result')
@@ -248,7 +263,7 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
         case 'tool':
           return this.getToolMessageParam(msg);
         default:
-          throw new Error(`Unsupported message role: ${msg.role}`);
+          throw new InvalidMessageError(`Unsupported message role: ${msg.role}`);
       }
     })();
     return this.dialectResolver ? this.dialectResolver.manipulateRawMessage(rawMsg, msg) : rawMsg;
@@ -297,13 +312,13 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
         const a =
           typeof last.content === 'string'
             ? [{ type: 'text' as const, text: last.content }]
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            : [...(last.content as any[])];
+            : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              [...(last.content as any[])];
         const b =
           typeof msg.content === 'string'
             ? [{ type: 'text' as const, text: msg.content }]
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            : [...(msg.content as any[])];
+            : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              [...(msg.content as any[])];
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         last.content = [...a, ...b] as any;
       } else {
@@ -317,7 +332,6 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
     options: ModelOptions,
     messages: Array<MessageParam>,
   ): MessageStreamParams {
-
     const mergedMessages = this.mergeConsecutiveSameRoleMessages(messages);
 
     const tools: AnthropicTool[] | undefined = options.tools?.map(
@@ -344,7 +358,9 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
         : undefined,
     };
 
-    return this.dialectResolver ? this.dialectResolver.manipulateOptions(options, params) : params;
+    return this.dialectResolver
+      ? (this.dialectResolver.manipulateOptions(options, params) as MessageStreamParams)
+      : params;
   }
 
   async generate(
@@ -352,7 +368,7 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
     messages: Array<MessageParam>,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<{ rawMessageId: string, rawMessage: MessageParam; usage?: UsageStats }> {
+  ): Promise<ModelResponse<MessageParam>> {
     const params = this.buildStreamParams(options, messages);
 
     let textChunkStarted = false;
@@ -425,13 +441,25 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
     const response = await stream.finalMessage();
 
     return {
-      rawMessageId: response.id,
-      rawMessage: { role: 'assistant', content: response.content } as unknown as MessageParam,
+      responseId: response.id,
+      responseMessage: response,
+      responseModel: response.model,
+      stopReason: response.stop_reason as string,
       usage: {
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
+        reasoningTokens:
+          this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ?? undefined,
+        cacheCreatedTokens:
+          this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
+          response.usage.cache_creation_input_tokens ??
+          undefined,
+        cacheReadTokens:
+          this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
+          response.usage.cache_read_input_tokens ??
+          undefined,
         totalTokens: response.usage.input_tokens + response.usage.output_tokens,
-      }
+      },
     };
   }
 }

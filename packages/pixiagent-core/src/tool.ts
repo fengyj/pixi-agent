@@ -101,10 +101,7 @@ export class ToolRegistry {
     return sets.flatMap((ts) =>
       ts.tools
         .filter((t) => t.funcChecker())
-        .map((t) => ({
-          ...t.definition,
-          name: `${ts.name}_${t.definition.name}`,
-        })),
+        .map((t) => t.definition),
     );
   }
 

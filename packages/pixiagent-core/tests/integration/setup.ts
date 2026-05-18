@@ -57,11 +57,13 @@ loadIntegrationEnv();
 const _cfg = getIntegrationConfig();
 if (_cfg.otelEnabled) {
   void setupObservability({
-    transport:         _cfg.otelTransport,
+    transport: _cfg.otelTransport,
     transportEndpoint: _cfg.otelEndpoint,
     logging: {
       serviceName: _cfg.otelServiceName,
-      outputToConsole: false,
+      serviceVersion: '0.1.0',
+      outputToOtel: true,
+      outputToConsole: true,
     },
   });
 

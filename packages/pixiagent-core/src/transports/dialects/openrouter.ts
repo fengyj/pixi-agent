@@ -1,4 +1,5 @@
 import type {
+  ChatCompletion,
   ChatCompletionAssistantMessageParam,
   ChatCompletionChunk,
   ChatCompletionMessageParam,
@@ -34,7 +35,8 @@ export class OpenRouterApiModeResolver extends ApiModeResolver {
 export class OpenRouterChatDialectResolver implements DialectResolver<
   ChatCompletionMessageParam,
   ChatCompletionChunk.Choice.Delta,
-  ChatCompletionStreamParams
+  ChatCompletionStreamParams,
+  ChatCompletion
 > {
   match(_model: string, baseUrl: string): boolean {
     return baseUrl.toLowerCase() === 'https://openrouter.ai/api/v1';
@@ -147,6 +149,16 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
 
     // Fallback: legacy delta.reasoning (or reasoning_content) field
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (delta as any).reasoning ?? (delta as any).reasoning_content ?? null;
+    return (delta as any).reasoning ?? (delta as any).reasoning_content ?? undefined;
+  }
+
+  extractFromResponse(
+    data: 'reasoning_tokens' | 'cache_read_tokens' | 'cache_created_tokens' | string,
+    response: ChatCompletion,
+  ): any {
+    if (data === 'cache_created_tokens') {
+      return (response.usage?.prompt_tokens_details as any)?.cache_write_tokens ?? undefined;
+    }
+    return undefined;
   }
 }

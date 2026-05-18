@@ -12,7 +12,8 @@ describe('observation integration smoke — write logs to ES', () => {
       logging: {
         serviceName: 'pixiagent-integration-test',
         serviceVersion: '0.1.0',
-        stdout: true,
+        outputToOtel: true,
+        outputToConsole: true,
       },
     });
   });

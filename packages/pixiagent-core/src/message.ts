@@ -1,6 +1,7 @@
 import type { MessageParam, RawContentBlockDelta } from '@anthropic-ai/sdk/resources/messages';
-import type { MessageStreamParams } from '@anthropic-ai/sdk/resources/messages/messages';
+import type { Message, MessageStreamParams } from '@anthropic-ai/sdk/resources/messages/messages';
 import type {
+  ChatCompletion,
   ChatCompletionChunk,
   ChatCompletionMessageParam,
   ChatCompletionStreamParams,
@@ -19,6 +20,9 @@ export type UsageStats = {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheReadTokens?: number;
+  cacheCreatedTokens?: number;
+  reasoningTokens?: number;
   inputTokenDetails?: {
     [name: string]: number;
   };
@@ -206,6 +210,8 @@ export type RawMessageType = ChatCompletionMessageParam | ResponseInputItem | Me
 export type RawDeltaMessageType = ChatCompletionChunk.Choice.Delta | RawContentBlockDelta;
 
 export type RawLLMParametersType = MessageStreamParams | ChatCompletionStreamParams;
+
+export type RawResponseType = ChatCompletion | Message;
 
 /**
  * The structure used for persistence.

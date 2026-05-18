@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { ApiModes, RawDeltaMessageType, RawLLMParametersType, RawMessageType, SessionMessage, UsageStats } from '../message';
+import {
+  ApiModes,
+  RawDeltaMessageType,
+  RawLLMParametersType,
+  RawMessageType,
+  RawResponseType,
+  SessionMessage,
+  UsageStats,
+} from '../message';
 import { ToolDefinitionSchema } from '../tool';
 
 /**
@@ -11,7 +19,12 @@ import { ToolDefinitionSchema } from '../tool';
 export abstract class ProviderTransport<TRawMessage> {
   constructor(
     public apiMode: ApiModes,
-    public dialectResolver?: DialectResolver<TRawMessage, RawDeltaMessageType, RawLLMParametersType>,
+    public dialectResolver?: DialectResolver<
+      TRawMessage,
+      RawDeltaMessageType,
+      RawLLMParametersType,
+      RawResponseType
+    >,
   ) {}
 
   abstract convertFromRawMessage(rawMsg: TRawMessage): SessionMessage;
@@ -23,14 +36,22 @@ export abstract class ProviderTransport<TRawMessage> {
     messages: TRawMessage[],
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<{ rawMessageId: string; rawMessage: TRawMessage; usage?: UsageStats }>;
+  ): Promise<ModelResponse<TRawMessage>>;
 }
 
 export type ModelRequestOptions = {
   signal?: AbortSignal | undefined | null;
   timeout?: number;
   maxRetries?: number;
-}
+};
+
+export type ModelResponse<TRawMessage> = {
+  responseId: string;
+  responseMessage: TRawMessage;
+  responseModel: string;
+  stopReason?: string;
+  usage?: UsageStats;
+};
 
 export const ModelOptionsSchema = z.object({
   /**
@@ -174,7 +195,7 @@ export abstract class ApiModeResolver {
  * Infer the dialect from the model and the baseUrl.
  *
  */
-export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters> {
+export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters, TRawResponse> {
   /**
    * Infer the dialect from the model, api mode and the baseUrl.
    * @param model
@@ -208,7 +229,17 @@ export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters> {
    * @param delta the raw delta.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  abstract extractFromDelta(data: string, delta: TRawDelta): any;
+  abstract extractFromDelta(data: 'reasoning' | string, delta: TRawDelta): any;
+  /**
+   * Extract the data from the raw message when receiving the final response.
+   * @param data the name of the data field.
+   * @param response the raw response.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  abstract extractFromResponse(
+    data: 'reasoning_tokens' | 'cache_read_tokens' | 'cache_created_tokens' | string,
+    response: TRawResponse,
+  ): any;
 }
 
 export class ApiModeResolverRegistry {
@@ -258,9 +289,21 @@ export class ApiModeResolverRegistry {
 }
 
 export class DialectResolverRegistry {
-  private readonly resolvers: DialectResolver<RawMessageType, RawDeltaMessageType, RawLLMParametersType>[] = [];
+  private readonly resolvers: DialectResolver<
+    RawMessageType,
+    RawDeltaMessageType,
+    RawLLMParametersType,
+    RawResponseType
+  >[] = [];
 
-  public registerResolver(resolver: DialectResolver<RawMessageType, RawDeltaMessageType, RawLLMParametersType>): this {
+  public registerResolver(
+    resolver: DialectResolver<
+      RawMessageType,
+      RawDeltaMessageType,
+      RawLLMParametersType,
+      RawResponseType
+    >,
+  ): this {
     this.resolvers.push(resolver);
     return this;
   }
@@ -275,7 +318,9 @@ export class DialectResolverRegistry {
   public resolveDialect(
     model: string,
     baseUrl: string,
-  ): DialectResolver<RawMessageType, RawDeltaMessageType, RawLLMParametersType> | undefined {
+  ):
+    | DialectResolver<RawMessageType, RawDeltaMessageType, RawLLMParametersType, RawResponseType>
+    | undefined {
     for (const resolver of this.resolvers) {
       if (resolver.match(model, baseUrl)) {
         return resolver;

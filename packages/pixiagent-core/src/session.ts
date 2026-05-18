@@ -7,6 +7,7 @@ import {
 } from './message';
 import { ModelOptions } from './transports';
 import { nanoid } from 'nanoid';
+import { InputQueueFullError } from './errors';
 
 /**
  * Session ID: nano(8)
@@ -113,7 +114,7 @@ export type SessionThreadInfo = {
 
 export const PendingMessageSchema = SessionMessageSchema.extend({
   type: z.literal('pending_message'),
-  pendingMessageId: z.string().default(() => nanoid(12)),
+  pendingMessageId: z.string(),
 });
 
 export type PendingMessage = z.infer<typeof PendingMessageSchema>;
@@ -161,9 +162,17 @@ export class SessionThread {
     return newMessage;
   }
 
-  addPendingMessage(pendingMessage: PendingMessage) {
-    this.threadInfo.inputQueue.push(pendingMessage);
+  addPendingMessage(pendingMessage: Omit<PendingMessage, 'pendingMessageId'>): PendingMessage {
+    if (this.threadInfo.inputQueue.length >= 10) {
+      throw new InputQueueFullError(10);
+    }
+    const msg = {
+      ...pendingMessage,
+      pendingMessageId: nanoid(12),
+    };
+    this.threadInfo.inputQueue.push(msg);
     this.threadInfo.updatedAt = new Date().toISOString();
+    return msg;
   }
 
   clearPendingMessages() {
@@ -265,7 +274,7 @@ function getSeqId(id: string, num: number, digits = 2): string {
  */
 function createSession(
   options: { modelOptions: ModelOptions; holder?: string; parentSessionId?: string },
-  message: PendingMessage,
+  message: Omit<PendingMessage, 'pendingMessageId'>,
 ): Session {
   const sessionId = createSessionId();
   const now = new Date().toISOString();
@@ -342,7 +351,7 @@ function forkThread(
   fromMessageId: string | undefined,
   includeHistory: boolean,
   modelOptions: ModelOptions,
-  pendingMessage: PendingMessage,
+  pendingMessage: Omit<PendingMessage, 'pendingMessageId'>,
 ): SessionThread {
   const threadId = getSeqId(session.sessionId, session.threads.length + 1);
   const threadInfo: SessionThreadInfo = {
