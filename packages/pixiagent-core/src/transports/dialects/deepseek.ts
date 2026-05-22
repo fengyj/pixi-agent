@@ -16,14 +16,14 @@ import type {
 } from '@anthropic-ai/sdk/resources/messages/messages';
 
 export class DeepSeekApiModeResolver extends ApiModeResolver {
-  getApiMode(model: string, baseUrl?: string): ApiModes | undefined {
+  getApiMode(_model: string, baseUrl?: string): ApiModes | undefined {
     if (!baseUrl) return ApiModes.COMPLETIONS;
     else if (baseUrl.toLowerCase() === 'https://api.deepseek.com') return ApiModes.COMPLETIONS;
     else if (baseUrl.toLowerCase() === 'https://api.deepseek.com/anthropic')
       return ApiModes.ANTHROPIC;
     return undefined;
   }
-  getBaseUrl(model: string, apiMode?: ApiModes): string | undefined {
+  getBaseUrl(_model: string, apiMode?: ApiModes): string | undefined {
     if (!apiMode || apiMode === ApiModes.COMPLETIONS) return 'https://api.deepseek.com';
     else if (apiMode === ApiModes.ANTHROPIC) return 'https://api.deepseek.com/anthropic';
     else return undefined;
@@ -43,7 +43,7 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
   // Models that doesn't support the reasoning_effort parameter
   private static readonly NON_REASONING_MODELS = ['deepseek-chat'];
 
-  match(model: string, baseUrl: string): boolean {
+  match(_model: string, baseUrl: string): boolean {
     return baseUrl.toLowerCase() === 'https://api.deepseek.com';
   }
 

@@ -20,7 +20,7 @@ export const Transport = {
     baseUrl?: string,
     apiKey?: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    dialectResolver?: DialectResolver<any, any, any>,
+    dialectResolver?: DialectResolver<any, any, any, any>,
   ): ProviderTransport<RawMessageType> {
     switch (apiMode) {
       case ApiModes.COMPLETIONS:

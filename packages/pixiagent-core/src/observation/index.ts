@@ -33,6 +33,13 @@
 import pino from 'pino';
 import { trace, metrics, context, propagation, diag, DiagConsoleLogger, DiagLogLevel } from '@opentelemetry/api';
 import type { Logger as PinoLogger } from 'pino';
+import { withSpan, Traced, retry, Retry } from './helpers';
+export type {
+  SpanHelperOptions,
+  TracedOptions,
+  RetryOptions,
+  RetryDecoratorOptions,
+} from './helpers';
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -739,6 +746,12 @@ export const Observation = {
   getMeter,
   setupObservability,
   shutdownObservability,
+  helpers: {
+    withSpan,
+    Traced,
+    retry,
+    Retry,
+  },
   Targets: {
     buildConsoleTransportTarget,
     buildOtelTransportTarget,

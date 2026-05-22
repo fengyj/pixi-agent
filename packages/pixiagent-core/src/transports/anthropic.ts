@@ -29,9 +29,13 @@ import {
   ToolResultPart,
   ImagePart,
   DocumentPart,
-  UsageStats,
 } from '../message';
-import { InvalidMessageError } from '../errors';
+import {
+  AgentInterruptedError,
+  InvalidMessageError,
+  ModelRequestTimeoutError,
+} from '../errors/types';
+import { isLikelyAbortError, isLikelyTimeoutError } from '../errors/guards';
 
 export class AnthropicTransport extends ProviderTransport<MessageParam> {
   readonly client: Anthropic;
@@ -433,33 +437,78 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
         callbacks?.onThinkingChunk?.('', 'end');
         callbacks?.onThinking?.(thinkingText);
       }
+
+      const response = await stream.finalMessage();
+
+      return {
+        responseId: response.id,
+        responseMessage: response,
+        responseModel: response.model,
+        stopReason:
+          this.dialectResolver?.extractFromResponse('stop_reason', response) ??
+          this.getStopReason(response.stop_reason as string),
+        refusal: response.stop_details?.explanation ?? undefined,
+        usage: {
+          inputTokens: response.usage.input_tokens,
+          outputTokens: response.usage.output_tokens,
+          reasoningTokens:
+            this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ?? undefined,
+          cacheCreatedTokens:
+            this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
+            response.usage.cache_creation_input_tokens ??
+            undefined,
+          cacheReadTokens:
+            this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
+            response.usage.cache_read_input_tokens ??
+            undefined,
+          totalTokens: response.usage.input_tokens + response.usage.output_tokens,
+        },
+      } as ModelResponse<MessageParam>;
     } catch (error) {
-      await callbacks?.onError?.(error as Error);
-      throw error;
+      const mappedError = this.wrapRequestError(error, requestOptions);
+      await callbacks?.onError?.(mappedError as Error);
+      throw mappedError;
     }
+  }
 
-    const response = await stream.finalMessage();
+  private wrapRequestError(error: unknown, requestOptions?: ModelRequestOptions): unknown {
+    const signal = requestOptions?.signal;
+    if (signal?.aborted) {
+      const reason = signal.reason;
+      if (reason instanceof AgentInterruptedError) {
+        return reason;
+      }
+      if (typeof reason === 'string' && reason.length > 0) {
+        return new AgentInterruptedError(reason);
+      }
+      if (reason instanceof Error && reason.message) {
+        return new AgentInterruptedError(reason.message);
+      }
+      return new AgentInterruptedError();
+    }
+    if (isLikelyAbortError(error)) {
+      return new AgentInterruptedError();
+    }
+    if (!isLikelyTimeoutError(error)) {
+      return error;
+    }
+    return new ModelRequestTimeoutError('anthropic', requestOptions?.timeout, error);
+  }
 
-    return {
-      responseId: response.id,
-      responseMessage: response,
-      responseModel: response.model,
-      stopReason: response.stop_reason as string,
-      usage: {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-        reasoningTokens:
-          this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ?? undefined,
-        cacheCreatedTokens:
-          this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
-          response.usage.cache_creation_input_tokens ??
-          undefined,
-        cacheReadTokens:
-          this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
-          response.usage.cache_read_input_tokens ??
-          undefined,
-        totalTokens: response.usage.input_tokens + response.usage.output_tokens,
-      },
-    };
+  private getStopReason(finishReason: string): string {
+    switch (finishReason) {
+      case 'end_turn':
+      case 'stop_sequence':
+      case 'pause_turn':
+        return 'stop';
+      case 'tool_use':
+        return 'tool_call';
+      case 'max_tokens':
+        return 'max_tokens';
+      case 'refusal':
+        return 'refusal';
+      default:
+        return finishReason;
+    }
   }
 }

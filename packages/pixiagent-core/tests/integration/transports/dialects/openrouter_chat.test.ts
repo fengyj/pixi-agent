@@ -25,7 +25,7 @@ const API_KEY = process.env.OPENROUTER_API_KEY;
 const BASE_URL = 'https://openrouter.ai/api/v1';
 
 const MODELS: { model: string; supportsReasoning: boolean }[] = [
-  { model: 'x-ai/grok-4.1-fast',                                  supportsReasoning: false },
+  { model: 'x-ai/grok-4.1-fast',                                   supportsReasoning: false },
   { model: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',   supportsReasoning: true  },
   { model: 'qwen/qwen3.5-flash-02-23',                             supportsReasoning: true  },
   { model: 'tencent/hy3-preview:free',                             supportsReasoning: false },

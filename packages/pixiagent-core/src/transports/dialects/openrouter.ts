@@ -9,7 +9,7 @@ import { ApiModes, SessionMessage, ThinkingPart, ContentPart } from '../../messa
 import { ApiModeResolver, DialectResolver, ModelOptions } from '../base';
 
 export class OpenRouterApiModeResolver extends ApiModeResolver {
-  getApiMode(model: string, baseUrl?: string): ApiModes | undefined {
+  getApiMode(_model: string, baseUrl?: string): ApiModes | undefined {
     if (baseUrl?.toLowerCase() === 'https://openrouter.ai/api/v1') return ApiModes.COMPLETIONS;
     return undefined;
   }

@@ -16,14 +16,22 @@
     "test:integration": "vitest run --config ../../vitest.integration.config.ts"
   },
   "exports": {
-    ".": "./src/index.ts",
-    "./observation": {
-      "browser": "./src/observation/browser.ts",
-      "default": "./src/observation/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     },
-    "./*": "./src/*.ts"
+    "./errors": {
+      "types": "./dist/errors/index.d.ts",
+      "default": "./dist/errors/index.js"
+    },
+    "./observation": {
+      "types": "./dist/observation/index.d.ts",
+      "browser": "./dist/observation/browser.js",
+      "default": "./dist/observation/index.js"
+    }
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.22.1",
     "@anthropic-ai/sdk": "^0.91.1",
     "@opentelemetry/api": "^1.9.1",
     "fast-xml-parser": "^5.7.3",

@@ -34,9 +34,13 @@ import {
   DocumentPart,
   ToolResultPart,
   ContentPart,
-  UsageStats,
 } from '../message';
-import { InvalidMessageError } from '../errors';
+import {
+  AgentInterruptedError,
+  InvalidMessageError,
+  ModelRequestTimeoutError,
+} from '../errors/types';
+import { isLikelyAbortError, isLikelyTimeoutError } from '../errors/guards';
 import { OpenAI } from 'openai/client';
 
 export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMessageParam> {
@@ -154,13 +158,26 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
           text: contentPart.text,
         } as TextPart);
       } else if (contentPart.type === 'image_url') {
+        const isBase64 = contentPart.image_url.url.startsWith('data:image/');
+        if (isBase64) {
+          const mediaType = contentPart.image_url.url.split(';')[0].split(':')[1];
+          const base64Data = contentPart.image_url.url.split(',')[1];
+        parts.push({
+          type: 'image',
+          image: {
+            sourceType: 'base64',
+            data: base64Data,
+            mimeType: mediaType,
+          },
+        } as ImagePart);}
+        else {
         parts.push({
           type: 'image',
           image: {
             sourceType: 'url',
             url: contentPart.image_url.url,
           },
-        } as ImagePart);
+        } as ImagePart);}
       } else if (contentPart.type === 'input_audio') {
         parts.push({
           type: 'audio',
@@ -182,6 +199,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
             data: contentPart.file.file_data ?? undefined,
             fileId: contentPart.file.file_id ?? undefined,
             fileName: contentPart.file.filename ?? undefined,
+            mediaType: contentPart.file.file_data ? '' : undefined,
           },
         } as DocumentPart);
       }
@@ -353,13 +371,25 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     const imageParts = msg.content
       .filter((part) => part.type === 'image')
       .map((part) => part as ImagePart)
-      .filter((part) => part.image.sourceType === 'url')
       .map(
-        (part) =>
-          ({
-            type: 'image_url',
-            image_url: { url: part.image.sourceType === 'url' ? part.image.url : '' },
-          }) as ChatCompletionContentPartImage,
+        (part) => {
+          switch (part.image.sourceType) {
+            case 'url':
+              return {
+                type: 'image_url',
+                image_url: { url: part.image.url },
+              } as ChatCompletionContentPartImage;
+            case 'base64':
+              return {
+                type: 'image_url',
+                image_url: { url: `data:${part.image.mimeType};base64,${part.image.data}` },
+              } as ChatCompletionContentPartImage;
+            default:
+              throw new InvalidMessageError(
+                `Unsupported image sourceType: ${part.image.sourceType}`,
+              );
+          }
+        }
       );
     const audioParts = msg.content
       .filter((part) => part.type === 'audio')
@@ -456,112 +486,159 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     let thinkingChunkStarted = false;
     let thinkingText = '';
 
-    const response = await this.client.chat.completions
-      .stream(params, requestOptions)
-      .on('chunk', (chunk) => {
-        const choice = chunk.choices[0];
-        if (!choice) return;
+    try {
+      const response = await this.client.chat.completions
+        .stream(params, requestOptions)
+        .on('chunk', (chunk) => {
+          const choice = chunk.choices[0];
+          if (!choice) return;
 
-        const delta = choice.delta;
+          const delta = choice.delta;
 
-        // Handle thinking/reasoning content (provider-specific field, extracted via dialect)
-        const reasoningDelta: string | null | undefined = this.dialectResolver?.extractFromDelta(
-          'reasoning',
-          delta,
-        );
-        if (reasoningDelta) {
-          thinkingText += reasoningDelta;
-          if (!thinkingChunkStarted) {
-            thinkingChunkStarted = true;
-            callbacks?.onThinkingChunk?.(reasoningDelta, 'begin');
-          } else {
-            callbacks?.onThinkingChunk?.(reasoningDelta);
-          }
-        }
-
-        // Handle text content
-        const textDelta: string | null | undefined = delta.content;
-        if (textDelta) {
-          // If thinking was active, signal its end before text begins
-          if (thinkingChunkStarted) {
-            thinkingChunkStarted = false;
-            callbacks?.onThinkingChunk?.('', 'end');
-            callbacks?.onThinking?.(thinkingText);
+          // Handle thinking/reasoning content (provider-specific field, extracted via dialect)
+          const reasoningDelta: string | null | undefined = this.dialectResolver?.extractFromDelta(
+            'reasoning',
+            delta,
+          );
+          if (reasoningDelta) {
+            thinkingText += reasoningDelta;
+            if (!thinkingChunkStarted) {
+              thinkingChunkStarted = true;
+              callbacks?.onThinkingChunk?.(reasoningDelta, 'begin');
+            } else {
+              callbacks?.onThinkingChunk?.(reasoningDelta);
+            }
           }
 
-          if (!textChunkStarted) {
-            textChunkStarted = true;
-            callbacks?.onTextChunk?.(textDelta, 'begin');
-          } else {
-            callbacks?.onTextChunk?.(textDelta);
-          }
-        }
+          // Handle text content
+          const textDelta: string | null | undefined = delta.content;
+          if (textDelta) {
+            // If thinking was active, signal its end before text begins
+            if (thinkingChunkStarted) {
+              thinkingChunkStarted = false;
+              callbacks?.onThinkingChunk?.('', 'end');
+              callbacks?.onThinking?.(thinkingText);
+            }
 
-        // Handle stream finish
-        if (choice.finish_reason) {
-          if (textChunkStarted) {
-            textChunkStarted = false;
-            callbacks?.onTextChunk?.('', 'end');
+            if (!textChunkStarted) {
+              textChunkStarted = true;
+              callbacks?.onTextChunk?.(textDelta, 'begin');
+            } else {
+              callbacks?.onTextChunk?.(textDelta);
+            }
           }
-          if (thinkingChunkStarted) {
-            thinkingChunkStarted = false;
-            callbacks?.onThinkingChunk?.('', 'end');
-            callbacks?.onThinking?.(thinkingText);
-          }
-        }
-      })
-      .on('content', (content) => {
-        if (callbacks?.onText) {
-          callbacks.onText(content);
-        }
-      })
-      .on('finalFunctionToolCall', (toolCall) => {
-        if (callbacks?.onToolUse) {
-          callbacks.onToolUse(toolCall.name, toolCall.arguments);
-        }
-      })
-      .on('error', (error) => {
-        if (callbacks?.onError) {
-          callbacks.onError(error);
-        }
-      })
-      .on('abort', (error) => {
-        if (callbacks?.onError) {
-          callbacks.onError(error);
-        }
-      })
-      .finalChatCompletion();
 
-    return {
-      responseId: response.id,
-      responseMessage: response.choices[0].message as ChatCompletionMessageParam,
-      responseModel: response.model,
-      usage: response.usage
-        ? {
-            inputTokens: response.usage.prompt_tokens,
-            outputTokens: response.usage.completion_tokens,
-            totalTokens: response.usage.total_tokens,
-            reasoningTokens:
-              this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ??
-              response.usage.completion_tokens_details?.reasoning_tokens ??
-              undefined,
-            cacheReadTokens:
-              this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
-              response.usage.prompt_tokens_details?.cached_tokens ??
-              undefined,
-            cacheCreatedTokens:
-              this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
-              undefined,
-            inputTokenDetails: response.usage.prompt_tokens_details
-              ? { ...response.usage.prompt_tokens_details }
-              : undefined,
-            outputTokenDetails: response.usage.completion_tokens_details
-              ? { ...response.usage.completion_tokens_details }
-              : undefined,
+          // Handle stream finish
+          if (choice.finish_reason) {
+            if (textChunkStarted) {
+              textChunkStarted = false;
+              callbacks?.onTextChunk?.('', 'end');
+            }
+            if (thinkingChunkStarted) {
+              thinkingChunkStarted = false;
+              callbacks?.onThinkingChunk?.('', 'end');
+              callbacks?.onThinking?.(thinkingText);
+            }
           }
-        : undefined,
-      stopReason: response.choices[0].finish_reason,
-    };
+        })
+        .on('content', (content) => {
+          if (callbacks?.onText) {
+            callbacks.onText(content);
+          }
+        })
+        .on('finalFunctionToolCall', (toolCall) => {
+          if (callbacks?.onToolUse) {
+            callbacks.onToolUse(toolCall.name, toolCall.arguments);
+          }
+        })
+        .on('error', (error) => {
+          if (callbacks?.onError) {
+            callbacks.onError(error);
+          }
+        })
+        .on('abort', (error) => {
+          if (callbacks?.onError) {
+            callbacks.onError(error);
+          }
+        })
+        .finalChatCompletion();
+
+      return {
+        responseId: response.id,
+        responseMessage: response.choices[0].message as ChatCompletionMessageParam,
+        responseModel: response.model,
+        stopReason:
+          this.dialectResolver?.extractFromResponse('stop_reason', response) ??
+          this.getStopReason(response.choices[0].finish_reason),
+        refusal: response.choices[0].message.refusal ?? undefined,
+        usage: response.usage
+          ? {
+              inputTokens: response.usage.prompt_tokens,
+              outputTokens: response.usage.completion_tokens,
+              totalTokens: response.usage.total_tokens,
+              reasoningTokens:
+                this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ??
+                response.usage.completion_tokens_details?.reasoning_tokens ??
+                undefined,
+              cacheReadTokens:
+                this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
+                response.usage.prompt_tokens_details?.cached_tokens ??
+                undefined,
+              cacheCreatedTokens:
+                this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
+                undefined,
+              inputTokenDetails: response.usage.prompt_tokens_details
+                ? { ...response.usage.prompt_tokens_details }
+                : undefined,
+              outputTokenDetails: response.usage.completion_tokens_details
+                ? { ...response.usage.completion_tokens_details }
+                : undefined,
+            }
+          : undefined,
+      } as ModelResponse<ChatCompletionMessageParam>;
+    } catch (error) {
+      throw this.wrapRequestError(error, requestOptions);
+    }
+  }
+
+  private wrapRequestError(error: unknown, requestOptions?: ModelRequestOptions): unknown {
+    const signal = requestOptions?.signal;
+    if (signal?.aborted) {
+      const reason = signal.reason;
+      if (reason instanceof AgentInterruptedError) {
+        return reason;
+      }
+      if (typeof reason === 'string' && reason.length > 0) {
+        return new AgentInterruptedError(reason);
+      }
+      if (reason instanceof Error && reason.message) {
+        return new AgentInterruptedError(reason.message);
+      }
+      return new AgentInterruptedError();
+    }
+    if (isLikelyAbortError(error)) {
+      return new AgentInterruptedError();
+    }
+    if (!isLikelyTimeoutError(error)) {
+      return error;
+    }
+    return new ModelRequestTimeoutError('openai', requestOptions?.timeout, error);
+  }
+
+  private getStopReason(finishReason: string): string {
+    switch (finishReason) {
+      case 'stop':
+        return 'stop';
+      case 'tool_calls':
+      case 'function_call':
+        return 'tool_call';
+      case 'length':
+        return 'max_tokens';
+      case 'content_filter':
+        return 'refusal';
+      default:
+        return finishReason;
+    }
   }
 
   /**

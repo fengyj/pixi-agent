@@ -202,16 +202,27 @@ function onPageHide(): void {
   void shutdownObservability();
 }
 
-function installUnloadHandlers(): void {
-  if (typeof window !== 'undefined') {
-    window.addEventListener('pagehide', onPageHide);
+type PageLifecycleWindow = {
+  addEventListener: (type: 'pagehide', listener: () => void) => void;
+  removeEventListener: (type: 'pagehide', listener: () => void) => void;
+};
+
+function getPageLifecycleWindow(): PageLifecycleWindow | undefined {
+  const maybeWindow = (globalThis as { window?: unknown }).window;
+  if (maybeWindow && typeof maybeWindow === 'object') {
+    return maybeWindow as PageLifecycleWindow;
   }
+  return undefined;
+}
+
+function installUnloadHandlers(): void {
+  const lifecycleWindow = getPageLifecycleWindow();
+  lifecycleWindow?.addEventListener('pagehide', onPageHide);
 }
 
 function removeUnloadHandlers(): void {
-  if (typeof window !== 'undefined') {
-    window.removeEventListener('pagehide', onPageHide);
-  }
+  const lifecycleWindow = getPageLifecycleWindow();
+  lifecycleWindow?.removeEventListener('pagehide', onPageHide);
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -295,8 +306,9 @@ async function setupObservability(options: ObservabilityOptions): Promise<void> 
     ]);
 
     const logExporter = new OTLPLogExporter({ url: `${resolvedEndpoint}/v1/logs` });
-    const lp = new LoggerProvider();
-    lp.addLogRecordProcessor(new BatchLogRecordProcessor(logExporter));
+    const lp = new LoggerProvider({
+      processors: [new BatchLogRecordProcessor(logExporter)],
+    });
     logs.setGlobalLoggerProvider(lp);
     _loggerProvider = lp;
     // The bridge is referenced by the transmit.send closure (makeTransmitSend).

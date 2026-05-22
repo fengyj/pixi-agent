@@ -49,7 +49,8 @@ export type ModelResponse<TRawMessage> = {
   responseId: string;
   responseMessage: TRawMessage;
   responseModel: string;
-  stopReason?: string;
+  stopReason?: 'stop' | 'tool_call' | 'max_tokens' | 'refusal' | 'cancelled' | 'timeout' | string;
+  refusal?: string;
   usage?: UsageStats;
 };
 
@@ -235,10 +236,15 @@ export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters, TRawR
    * @param data the name of the data field.
    * @param response the raw response.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   abstract extractFromResponse(
-    data: 'reasoning_tokens' | 'cache_read_tokens' | 'cache_created_tokens' | string,
+    data:
+      | 'reasoning_tokens'
+      | 'cache_read_tokens'
+      | 'cache_created_tokens'
+      | 'stop_reason'
+      | string,
     response: TRawResponse,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): any;
 }
 

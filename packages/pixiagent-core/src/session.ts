@@ -1,13 +1,11 @@
-import { z } from 'zod';
+
 import {
   InternalMessage,
   RawMessageType,
   UsageStats,
-  SessionMessageSchema,
 } from './message';
 import { ModelOptions } from './transports';
 import { nanoid } from 'nanoid';
-import { InputQueueFullError } from './errors';
 
 /**
  * Session ID: nano(8)
@@ -15,8 +13,25 @@ import { InputQueueFullError } from './errors';
  * Message ID: Thread ID + seq number (2 digits, basic range: 01~99, extend range: A0~ZZ)
  */
 
+/**
+ * The session is a context of the agent activities.
+ *
+ * It includes the messages, and some other information. A session is binded to a host,
+ * which means the session is only valid for the specific host. If want to continue
+ * the conversation in another host, has to handover it to the new one. The agent can
+ * handover the session voluntarily or asked fron another host. For example, user wants to
+ * continue the work from local to cloud, or takeover the session to mobile device. By doing so,
+ * we don't have to worry about the concurrency issue.
+ *
+ * And the conversation is not linear. The user can fork from a message to discuss anther topic,
+ * or the agent can delegate a subtask to another agent. And the compression of the messages also
+ * can be thought as a kind of fork. The compressed message is forked from an assistant message,
+ * and joined back to the last (n) message(s) in the original conversation.
+ *
+ */
 export type Session = {
   sessionId: string;
+  title?: string;
   createdAt: string;
   updatedAt: string;
   /**
@@ -54,30 +69,44 @@ export type Session = {
    * we may save the last message has been saved, so just nedd save the new messages next time.
    */
   metadata?: Record<string, string>;
-
   /**
-   * The session is a context of the agent activities.
-   *
-   * It includes the messages, and some other information. A session is binded to a host,
-   * which means the session is only valid for the specific host. If want to continue
-   * the conversation in another host, has to handover it to the new one. The agent can
-   * handover the session voluntarily or asked fron another host. For example, user wants to
-   * continue the work from local to cloud, or takeover the session to mobile device. By doing so,
-   * we don't have to worry about the concurrency issue.
-   *
-   * And the conversation is not linear. The user can fork from a message to discuss anther topic,
-   * or the agent can delegate a subtask to another agent. And the compression of the messages also
-   * can be thought as a kind of fork. The compressed message is forked from an assistant message,
-   * and joined back to the last (n) message(s) in the original conversation.
-   *
+   * This is used for recording the sources of the media (image, video, audio, document, etc.)
    */
+  mediaInfo?: MediaInfo[];
 };
+
+/**
+ * This is used for recording the sources of the media (image, video, audio, document, etc.) 
+ * information in the messages when they were attached as files or URLs. This data can be
+ * used when the URL or the file id is expired or invalid, so that the media can be re-uploaded 
+ * or re-fetched.
+ */
+export type MediaInfo = {
+  /**
+   * The value can be used to retrieve the media from the original source. It can be a URL,
+   * or a file path, or something else, like a key of the record in the database.
+   */
+  originalKey: string;
+  /**
+   * The value used by the message. Can be a URL or file id.
+   */
+  key: string;
+  /**
+   * If the key has a expiration time, it can be used to determine if need to create a new 
+   * key or not.
+   */
+  expireAt?: number;
+}
 
 export type SessionThreadInfo = {
   /**
    * Thread id, it's a constant value.
    */
   threadId: string;
+  /**
+   * The title of the thread.
+   */
+  title?: string;
   /**
    * There are two kinds of thread, one is branch style, the other is annotation style.
    * - Branch: the thread is forked from a particular message, and the messages before that
@@ -98,26 +127,9 @@ export type SessionThreadInfo = {
    * we may know if needs to use a new transports or a new dialect.
    */
   modelOptions: ModelOptions;
-  /**
-   * The input queue of the thread.
-   * Any messages haven't been processed need to be kept here. Like, the user input,
-   * the tool calls haven't been executed, or tool results haven't been sent to LLM.
-   *
-   * If the item contains ToolCallPart, means tool call input,
-   * and if it contains ToolResultPart, means tool result input,
-   * otherwise, means the user input.
-   */
-  inputQueue: PendingMessage[];
   createdAt: string;
   updatedAt: string;
 };
-
-export const PendingMessageSchema = SessionMessageSchema.extend({
-  type: z.literal('pending_message'),
-  pendingMessageId: z.string(),
-});
-
-export type PendingMessage = z.infer<typeof PendingMessageSchema>;
 
 /**
  * The session thread is a linear conversation flow. It is used for the conversation with the LLM.
@@ -132,6 +144,7 @@ export class SessionThread {
   ) {}
 
   addMessage(
+    role: 'assistant' | 'user' | 'tool',
     rawMessage: RawMessageType,
     modelOptions: ModelOptions,
     usage?: UsageStats,
@@ -148,7 +161,8 @@ export class SessionThread {
       model: modelOptions.model,
       apiMode: modelOptions.apiMode!,
       baseUrl: modelOptions.baseUrl,
-      rawMessage,
+      rawMessage: rawMessage,
+      role: role,
       previousMessageId: lastMessageId,
       createdAt: createdAt,
       completedAt: now,
@@ -160,35 +174,6 @@ export class SessionThread {
     this.threadInfo.headMessageId = newMessage.internalMessageId;
     this.threadInfo.updatedAt = now;
     return newMessage;
-  }
-
-  addPendingMessage(pendingMessage: Omit<PendingMessage, 'pendingMessageId'>): PendingMessage {
-    if (this.threadInfo.inputQueue.length >= 10) {
-      throw new InputQueueFullError(10);
-    }
-    const msg = {
-      ...pendingMessage,
-      pendingMessageId: nanoid(12),
-    };
-    this.threadInfo.inputQueue.push(msg);
-    this.threadInfo.updatedAt = new Date().toISOString();
-    return msg;
-  }
-
-  clearPendingMessages() {
-    this.threadInfo.inputQueue = [];
-    this.threadInfo.updatedAt = new Date().toISOString();
-  }
-
-  getPendingMessages(): PendingMessage[] {
-    return this.threadInfo.inputQueue;
-  }
-
-  removePendingMessage(pendingMessageIds: string[]) {
-    this.threadInfo.inputQueue = this.threadInfo.inputQueue.filter(
-      (msg) => !pendingMessageIds.includes(msg.pendingMessageId),
-    );
-    this.threadInfo.updatedAt = new Date().toISOString();
   }
 }
 
@@ -274,7 +259,6 @@ function getSeqId(id: string, num: number, digits = 2): string {
  */
 function createSession(
   options: { modelOptions: ModelOptions; holder?: string; parentSessionId?: string },
-  message: Omit<PendingMessage, 'pendingMessageId'>,
 ): Session {
   const sessionId = createSessionId();
   const now = new Date().toISOString();
@@ -288,7 +272,7 @@ function createSession(
     threads: [],
     defaultThread: getSeqId(sessionId, 1),
   };
-  forkThread(session, undefined, false, options.modelOptions, message);
+  forkThread(session, undefined, false, options.modelOptions);
   return session;
 }
 
@@ -351,7 +335,6 @@ function forkThread(
   fromMessageId: string | undefined,
   includeHistory: boolean,
   modelOptions: ModelOptions,
-  pendingMessage: Omit<PendingMessage, 'pendingMessageId'>,
 ): SessionThread {
   const threadId = getSeqId(session.sessionId, session.threads.length + 1);
   const threadInfo: SessionThreadInfo = {
@@ -359,12 +342,10 @@ function forkThread(
     rootMessageId: includeHistory ? undefined : fromMessageId,
     headMessageId: fromMessageId,
     modelOptions: modelOptions,
-    inputQueue: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
   session.threads.push(threadInfo);
   const thread = getThreadsFromSession(session, threadInfo.threadId) as SessionThread;
-  thread.addPendingMessage(pendingMessage);
   return thread;
 }
