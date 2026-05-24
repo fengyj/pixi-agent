@@ -56,4 +56,30 @@ describe('chat dialect message manipulation', () => {
       { type: 'text', text: '2 + 2 = 4' },
     ]);
   });
+
+  it('OpenRouter extracts reasoning.text delta', () => {
+    const resolver = new OpenRouterChatDialectResolver();
+
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const delta = {
+      reasoning_details: [{ type: 'reasoning.text', text: 'step one. ' }],
+    } as any;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+
+    const out = resolver.extractFromDelta('reasoning', delta);
+    expect(out).toBe('step one. ');
+  });
+
+  it('OpenRouter extracts reasoning.summary delta', () => {
+    const resolver = new OpenRouterChatDialectResolver();
+
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const delta = {
+      reasoning_details: [{ type: 'reasoning.summary', summary: 'summary chunk. ' }],
+    } as any;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+
+    const out = resolver.extractFromDelta('reasoning', delta);
+    expect(out).toBe('summary chunk. ');
+  });
 });

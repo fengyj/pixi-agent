@@ -10,7 +10,11 @@ import type {
   ThinkingBlockParam,
   RawContentBlockDelta,
 } from '@anthropic-ai/sdk/resources/messages';
-import type { Message, MessageStreamParams } from '@anthropic-ai/sdk/resources/messages/messages';
+import type {
+  Message,
+  MessageStreamParams,
+  RawMessageStreamEvent,
+} from '@anthropic-ai/sdk/resources/messages/messages';
 import {
   ProviderTransport,
   ModelOptions,
@@ -39,6 +43,17 @@ import { isLikelyAbortError, isLikelyTimeoutError } from '../errors/guards';
 
 export class AnthropicTransport extends ProviderTransport<MessageParam> {
   readonly client: Anthropic;
+  private static readonly OFFICIAL_BASE_URL = 'https://api.anthropic.com';
+  private readonly configuredBaseUrl?: string;
+
+  private static normalizeBaseUrl(baseUrl?: string): string | undefined {
+    if (!baseUrl) return baseUrl;
+    const normalized = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+    if (normalized.toLowerCase().endsWith('/v1/messages')) {
+      return normalized.slice(0, -'/v1/messages'.length);
+    }
+    return normalized;
+  }
 
   constructor(
     baseUrl?: string,
@@ -51,7 +66,8 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
     >,
   ) {
     super(ApiModes.ANTHROPIC, dialectResolver);
-    this.client = new Anthropic({ baseURL: baseUrl, apiKey });
+    this.configuredBaseUrl = AnthropicTransport.normalizeBaseUrl(baseUrl);
+    this.client = new Anthropic({ baseURL: this.configuredBaseUrl, apiKey });
   }
 
   // ─── convertFromRawMessage ────────────────────────────────────────────────
@@ -246,7 +262,6 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
       );
     }
     const blocks: ToolResultBlockParam[] = msg.content
-      .filter((p) => p.type === 'tool_result')
       .map((p) => p as ToolResultPart)
       .map((p) => ({
         type: 'tool_result' as const,
@@ -367,6 +382,262 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
       : params;
   }
 
+  private isOfficialService(): boolean {
+    const normalized = AnthropicTransport.normalizeBaseUrl(this.configuredBaseUrl)?.toLowerCase();
+    return !normalized || normalized === AnthropicTransport.OFFICIAL_BASE_URL;
+  }
+
+  private getStreamRequestOptions(requestOptions?: ModelRequestOptions): {
+    signal?: AbortSignal;
+    timeout?: number;
+  } {
+    const streamRequestOptions: {
+      signal?: AbortSignal;
+      timeout?: number;
+    } = {};
+    if (requestOptions?.signal) {
+      streamRequestOptions.signal = requestOptions.signal;
+    }
+    if (typeof requestOptions?.timeout === 'number') {
+      streamRequestOptions.timeout = requestOptions.timeout;
+    }
+    return streamRequestOptions;
+  }
+
+  private toModelResponse(response: Message): ModelResponse<MessageParam> {
+    return {
+      responseId: response.id,
+      responseMessage: response,
+      responseModel: response.model,
+      stopReason:
+        this.dialectResolver?.extractFromResponse('stop_reason', response) ??
+        this.getStopReason(response.stop_reason as string),
+      refusal: response.stop_details?.explanation ?? undefined,
+      usage: {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        reasoningTokens:
+          this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ?? undefined,
+        cacheCreatedTokens:
+          this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
+          response.usage.cache_creation_input_tokens ??
+          undefined,
+        cacheReadTokens:
+          this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
+          response.usage.cache_read_input_tokens ??
+          undefined,
+        totalTokens: response.usage.input_tokens + response.usage.output_tokens,
+      },
+    } as ModelResponse<MessageParam>;
+  }
+
+  private async generateWithOfficialStream(
+    params: MessageStreamParams,
+    callbacks?: StreamCallbacks,
+    requestOptions?: ModelRequestOptions,
+  ): Promise<ModelResponse<MessageParam>> {
+    let textChunkStarted = false;
+    let thinkingChunkStarted = false;
+    let thinkingText = '';
+    let currentToolName: string | undefined;
+
+    const stream = this.client.messages.stream(params, this.getStreamRequestOptions(requestOptions));
+
+    for await (const event of stream) {
+      if (event.type === 'content_block_start') {
+        if (event.content_block.type === 'tool_use') {
+          currentToolName = event.content_block.name;
+        }
+      } else if (event.type === 'content_block_delta') {
+        const delta = event.delta;
+        if (delta.type === 'text_delta') {
+          if (thinkingChunkStarted) {
+            thinkingChunkStarted = false;
+            callbacks?.onThinkingChunk?.('', 'end');
+            callbacks?.onThinking?.(thinkingText);
+            thinkingText = '';
+          }
+          if (!textChunkStarted) {
+            textChunkStarted = true;
+            callbacks?.onTextChunk?.(delta.text, 'begin');
+          } else {
+            callbacks?.onTextChunk?.(delta.text);
+          }
+          callbacks?.onText?.(delta.text);
+        } else if (delta.type === 'thinking_delta') {
+          thinkingText += delta.thinking;
+          if (!thinkingChunkStarted) {
+            thinkingChunkStarted = true;
+            callbacks?.onThinkingChunk?.(delta.thinking, 'begin');
+          } else {
+            callbacks?.onThinkingChunk?.(delta.thinking);
+          }
+        } else if (delta.type === 'input_json_delta' && currentToolName) {
+          callbacks?.onToolUse?.(currentToolName, delta.partial_json);
+        }
+      } else if (event.type === 'content_block_stop') {
+        currentToolName = undefined;
+      } else if (event.type === 'message_stop') {
+        if (textChunkStarted) {
+          textChunkStarted = false;
+          callbacks?.onTextChunk?.('', 'end');
+        }
+        if (thinkingChunkStarted) {
+          thinkingChunkStarted = false;
+          callbacks?.onThinkingChunk?.('', 'end');
+          callbacks?.onThinking?.(thinkingText);
+          thinkingText = '';
+        }
+      }
+    }
+
+    if (textChunkStarted) callbacks?.onTextChunk?.('', 'end');
+    if (thinkingChunkStarted) {
+      callbacks?.onThinkingChunk?.('', 'end');
+      callbacks?.onThinking?.(thinkingText);
+    }
+
+    const response = await stream.finalMessage();
+    return this.toModelResponse(response);
+  }
+
+  private async generateWithThirdPartyCreate(
+    params: MessageStreamParams,
+    callbacks?: StreamCallbacks,
+    requestOptions?: ModelRequestOptions,
+  ): Promise<ModelResponse<MessageParam>> {
+    let textChunkStarted = false;
+    let thinkingChunkStarted = false;
+    let thinkingText = '';
+    let currentToolName: string | undefined;
+    const toolInputJsonByIndex = new Map<number, string>();
+    let response: Message | undefined;
+
+    const stream = (await this.client.messages.create(
+      // Cast because MessageStreamParams can include parser helper types (e.g. output_config null)
+      // that are accepted by messages.stream but not by the stricter create(stream:true) overload.
+      { ...params, stream: true } as unknown as Anthropic.Messages.MessageCreateParamsStreaming,
+      this.getStreamRequestOptions(requestOptions),
+    )) as unknown as AsyncIterable<RawMessageStreamEvent>;
+
+    for await (const event of stream) {
+      if (event.type === 'message_start') {
+        response = structuredClone(event.message);
+      } else if (event.type === 'content_block_start') {
+        if (event.content_block.type === 'tool_use') {
+          currentToolName = event.content_block.name;
+        }
+        if (response && Array.isArray(response.content)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (response.content as any[])[event.index] = structuredClone(event.content_block);
+        }
+      } else if (event.type === 'content_block_delta') {
+        const delta = event.delta;
+        if (delta.type === 'text_delta') {
+          if (thinkingChunkStarted) {
+            thinkingChunkStarted = false;
+            callbacks?.onThinkingChunk?.('', 'end');
+            callbacks?.onThinking?.(thinkingText);
+            thinkingText = '';
+          }
+          if (!textChunkStarted) {
+            textChunkStarted = true;
+            callbacks?.onTextChunk?.(delta.text, 'begin');
+          } else {
+            callbacks?.onTextChunk?.(delta.text);
+          }
+          callbacks?.onText?.(delta.text);
+
+          if (response && Array.isArray(response.content)) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const block = (response.content as any[])[event.index];
+            if (block?.type === 'text') {
+              block.text = `${block.text ?? ''}${delta.text}`;
+            }
+          }
+        } else if (delta.type === 'thinking_delta') {
+          thinkingText += delta.thinking;
+          if (!thinkingChunkStarted) {
+            thinkingChunkStarted = true;
+            callbacks?.onThinkingChunk?.(delta.thinking, 'begin');
+          } else {
+            callbacks?.onThinkingChunk?.(delta.thinking);
+          }
+
+          if (response && Array.isArray(response.content)) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const block = (response.content as any[])[event.index];
+            if (block?.type === 'thinking') {
+              block.thinking = `${block.thinking ?? ''}${delta.thinking}`;
+            }
+          }
+        } else if (delta.type === 'input_json_delta') {
+          if (currentToolName) {
+            callbacks?.onToolUse?.(currentToolName, delta.partial_json);
+          }
+          toolInputJsonByIndex.set(
+            event.index,
+            `${toolInputJsonByIndex.get(event.index) ?? ''}${delta.partial_json}`,
+          );
+        }
+      } else if (event.type === 'content_block_stop') {
+        currentToolName = undefined;
+      } else if (event.type === 'message_delta') {
+        if (response) {
+          response.stop_reason = event.delta.stop_reason;
+          response.stop_sequence = event.delta.stop_sequence;
+          response.stop_details = event.delta.stop_details;
+          response.usage = {
+            ...response.usage,
+            ...event.usage,
+            input_tokens: event.usage.input_tokens ?? response.usage.input_tokens,
+            cache_creation_input_tokens:
+              event.usage.cache_creation_input_tokens ?? response.usage.cache_creation_input_tokens,
+            cache_read_input_tokens:
+              event.usage.cache_read_input_tokens ?? response.usage.cache_read_input_tokens,
+          } as Message['usage'];
+        }
+      } else if (event.type === 'message_stop') {
+        if (textChunkStarted) {
+          textChunkStarted = false;
+          callbacks?.onTextChunk?.('', 'end');
+        }
+        if (thinkingChunkStarted) {
+          thinkingChunkStarted = false;
+          callbacks?.onThinkingChunk?.('', 'end');
+          callbacks?.onThinking?.(thinkingText);
+          thinkingText = '';
+        }
+      }
+    }
+
+    if (textChunkStarted) callbacks?.onTextChunk?.('', 'end');
+    if (thinkingChunkStarted) {
+      callbacks?.onThinkingChunk?.('', 'end');
+      callbacks?.onThinking?.(thinkingText);
+    }
+
+    if (!response) {
+      throw new Error('Anthropic stream ended without a message_start event');
+    }
+
+    if (Array.isArray(response.content)) {
+      for (const [index, partialJson] of toolInputJsonByIndex.entries()) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const block = (response.content as any[])[index];
+        if (block?.type === 'tool_use' && partialJson.length > 0) {
+          try {
+            block.input = JSON.parse(partialJson);
+          } catch {
+            block.input = {};
+          }
+        }
+      }
+    }
+
+    return this.toModelResponse(response);
+  }
+
   async generate(
     options: ModelOptions,
     messages: Array<MessageParam>,
@@ -375,95 +646,10 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
   ): Promise<ModelResponse<MessageParam>> {
     const params = this.buildStreamParams(options, messages);
 
-    let textChunkStarted = false;
-    let thinkingChunkStarted = false;
-    let thinkingText = '';
-    let currentToolName: string | undefined;
-
-    const stream = this.client.messages.stream(params, requestOptions);
-
     try {
-      for await (const event of stream) {
-        if (event.type === 'content_block_start') {
-          if (event.content_block.type === 'tool_use') {
-            currentToolName = event.content_block.name;
-          }
-        } else if (event.type === 'content_block_delta') {
-          const delta = event.delta;
-          if (delta.type === 'text_delta') {
-            if (thinkingChunkStarted) {
-              thinkingChunkStarted = false;
-              callbacks?.onThinkingChunk?.('', 'end');
-              callbacks?.onThinking?.(thinkingText);
-              thinkingText = '';
-            }
-            if (!textChunkStarted) {
-              textChunkStarted = true;
-              callbacks?.onTextChunk?.(delta.text, 'begin');
-            } else {
-              callbacks?.onTextChunk?.(delta.text);
-            }
-            callbacks?.onText?.(delta.text);
-          } else if (delta.type === 'thinking_delta') {
-            thinkingText += delta.thinking;
-            if (!thinkingChunkStarted) {
-              thinkingChunkStarted = true;
-              callbacks?.onThinkingChunk?.(delta.thinking, 'begin');
-            } else {
-              callbacks?.onThinkingChunk?.(delta.thinking);
-            }
-          } else if (delta.type === 'input_json_delta' && currentToolName) {
-            callbacks?.onToolUse?.(currentToolName, delta.partial_json);
-          }
-        } else if (event.type === 'content_block_stop') {
-          currentToolName = undefined;
-        } else if (event.type === 'message_stop') {
-          if (textChunkStarted) {
-            textChunkStarted = false;
-            callbacks?.onTextChunk?.('', 'end');
-          }
-          if (thinkingChunkStarted) {
-            thinkingChunkStarted = false;
-            callbacks?.onThinkingChunk?.('', 'end');
-            callbacks?.onThinking?.(thinkingText);
-            thinkingText = '';
-          }
-        }
-      }
-
-      // Safety net: flush open chunks if message_stop was not observed
-      if (textChunkStarted) callbacks?.onTextChunk?.('', 'end');
-      if (thinkingChunkStarted) {
-        callbacks?.onThinkingChunk?.('', 'end');
-        callbacks?.onThinking?.(thinkingText);
-      }
-
-      const response = await stream.finalMessage();
-
-      return {
-        responseId: response.id,
-        responseMessage: response,
-        responseModel: response.model,
-        stopReason:
-          this.dialectResolver?.extractFromResponse('stop_reason', response) ??
-          this.getStopReason(response.stop_reason as string),
-        refusal: response.stop_details?.explanation ?? undefined,
-        usage: {
-          inputTokens: response.usage.input_tokens,
-          outputTokens: response.usage.output_tokens,
-          reasoningTokens:
-            this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ?? undefined,
-          cacheCreatedTokens:
-            this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
-            response.usage.cache_creation_input_tokens ??
-            undefined,
-          cacheReadTokens:
-            this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
-            response.usage.cache_read_input_tokens ??
-            undefined,
-          totalTokens: response.usage.input_tokens + response.usage.output_tokens,
-        },
-      } as ModelResponse<MessageParam>;
+      return this.isOfficialService()
+        ? await this.generateWithOfficialStream(params, callbacks, requestOptions)
+        : await this.generateWithThirdPartyCreate(params, callbacks, requestOptions);
     } catch (error) {
       const mappedError = this.wrapRequestError(error, requestOptions);
       await callbacks?.onError?.(mappedError as Error);

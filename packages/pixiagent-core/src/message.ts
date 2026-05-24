@@ -6,7 +6,12 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionStreamParams,
 } from 'openai/resources/chat/completions/completions';
-import type { ResponseInputItem } from 'openai/resources/responses/responses';
+import type {
+  Response,
+  ResponseCreateParams,
+  ResponseInputItem,
+  ResponseStreamEvent,
+} from 'openai/resources/responses/responses';
 import { z } from 'zod';
 
 export enum ApiModes {
@@ -30,6 +35,56 @@ export type UsageStats = {
     [name: string]: number;
   };
   // todo: add price field
+};
+
+function mergeTokenDetails(
+  a?: UsageStats['inputTokenDetails'],
+  b?: UsageStats['inputTokenDetails'],
+): UsageStats['inputTokenDetails'] | undefined {
+  if (!a && !b) {
+    return undefined;
+  }
+
+  const merged: Record<string, number> = {};
+
+  if (a) {
+    for (const [key, value] of Object.entries(a)) {
+      merged[key] = value;
+    }
+  }
+
+  if (b) {
+    for (const [key, value] of Object.entries(b)) {
+      merged[key] = (merged[key] ?? 0) + value;
+    }
+  }
+
+  return merged;
+}
+
+export const UsageStats = {
+  empty: (): UsageStats => ({
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreatedTokens: 0,
+    reasoningTokens: 0,
+  }),
+  sum: (a: UsageStats, b?: UsageStats): UsageStats => {
+    if (!b) return a;
+
+    return {
+      inputTokens: a.inputTokens + b.inputTokens,
+      outputTokens: a.outputTokens + b.outputTokens,
+      totalTokens: a.totalTokens + b.totalTokens,
+      cacheReadTokens: (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0),
+      cacheCreatedTokens: (a.cacheCreatedTokens ?? 0) + (b.cacheCreatedTokens ?? 0),
+      reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0),
+      inputTokenDetails: mergeTokenDetails(a.inputTokenDetails, b.inputTokenDetails),
+      outputTokenDetails: mergeTokenDetails(a.outputTokenDetails, b.outputTokenDetails),
+    };
+  },
 };
 
 /**
@@ -250,11 +305,17 @@ export type SessionMessage = z.infer<typeof SessionMessageSchema>;
 
 export type RawMessageType = ChatCompletionMessageParam | ResponseInputItem | MessageParam;
 
-export type RawDeltaMessageType = ChatCompletionChunk.Choice.Delta | RawContentBlockDelta;
+export type RawDeltaMessageType =
+  | ChatCompletionChunk.Choice.Delta
+  | ResponseStreamEvent
+  | RawContentBlockDelta;
 
-export type RawLLMParametersType = MessageStreamParams | ChatCompletionStreamParams;
+export type RawLLMParametersType =
+  | MessageStreamParams
+  | ChatCompletionStreamParams
+  | ResponseCreateParams;
 
-export type RawResponseType = ChatCompletion | Message;
+export type RawResponseType = ChatCompletion | Response | Message;
 
 /**
  * The structure used for persistence.

@@ -5,16 +5,41 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionStreamParams,
 } from 'openai/resources/chat/completions';
+import type {
+  Response,
+  ResponseCreateParams,
+  ResponseInputItem,
+  ResponseStreamEvent,
+} from 'openai/resources/responses/responses';
+import type {
+  Message,
+  MessageParam,
+  MessageStreamParams,
+  RawContentBlockDelta,
+} from '@anthropic-ai/sdk/resources/messages/messages';
 import { ApiModes, SessionMessage, ThinkingPart, ContentPart } from '../../message';
 import { ApiModeResolver, DialectResolver, ModelOptions } from '../base';
 
+const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+const OPENROUTER_RESPONSES_ENDPOINT = 'https://openrouter.ai/api/v1/responses';
+const OPENROUTER_ANTHROPIC_MESSAGES_ENDPOINT = 'https://openrouter.ai/api/v1/messages';
+
+function normalizeUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  return url.endsWith('/') ? url.slice(0, -1).toLowerCase() : url.toLowerCase();
+}
+
 export class OpenRouterApiModeResolver extends ApiModeResolver {
   getApiMode(_model: string, baseUrl?: string): ApiModes | undefined {
-    if (baseUrl?.toLowerCase() === 'https://openrouter.ai/api/v1') return ApiModes.COMPLETIONS;
+    const normalized = normalizeUrl(baseUrl);
+    if (normalized === OPENROUTER_ANTHROPIC_MESSAGES_ENDPOINT) return ApiModes.ANTHROPIC;
+    if (normalized === OPENROUTER_RESPONSES_ENDPOINT) return ApiModes.RESPONSE;
+    if (normalized === OPENROUTER_BASE) return ApiModes.COMPLETIONS;
     return undefined;
   }
 
-  getBaseUrl(_model: string, _apiMode?: ApiModes): string | undefined {
+  getBaseUrl(_model: string, apiMode?: ApiModes): string | undefined {
+    if (apiMode === ApiModes.RESPONSE) return OPENROUTER_RESPONSES_ENDPOINT;
     return undefined;
   }
 }
@@ -39,7 +64,8 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
   ChatCompletion
 > {
   match(_model: string, baseUrl: string): boolean {
-    return baseUrl.toLowerCase() === 'https://openrouter.ai/api/v1';
+    const normalized = normalizeUrl(baseUrl);
+    return normalized === OPENROUTER_BASE;
   }
 
   manipulateOptions(
@@ -134,15 +160,22 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
   extractFromDelta(data: string, delta: ChatCompletionChunk.Choice.Delta): any {
     if (data !== 'reasoning') return null;
 
-    // OpenRouter streaming: reasoning arrives in delta.reasoning_details[].text
+    // OpenRouter streaming: reasoning can arrive in reasoning_details with either
+    // reasoning.text or reasoning.summary blocks depending on upstream provider.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const reasoningDetails = (delta as any).reasoning_details;
     if (Array.isArray(reasoningDetails)) {
       const text = reasoningDetails
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .filter((d: any) => d.type === 'reasoning.text' && d.text)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .map((d: any) => d.text as string)
+        .map((d: any) => {
+          if (d.type === 'reasoning.text') {
+            return d.text ?? d.delta ?? '';
+          }
+          if (d.type === 'reasoning.summary') {
+            return d.summary ?? d.text ?? d.delta ?? '';
+          }
+          return '';
+        })
         .join('');
       if (text) return text;
     }
@@ -155,10 +188,111 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
   extractFromResponse(
     data: 'reasoning_tokens' | 'cache_read_tokens' | 'cache_created_tokens' | string,
     response: ChatCompletion,
-  ): any {
+  ): number | undefined {
     if (data === 'cache_created_tokens') {
-      return (response.usage?.prompt_tokens_details as any)?.cache_write_tokens ?? undefined;
+      return (
+        response.usage?.prompt_tokens_details as { cache_write_tokens?: number } | undefined
+      )?.cache_write_tokens;
     }
+    return undefined;
+  }
+}
+
+/**
+ * Dialect resolver for OpenRouter via the OpenAI Responses API (https://openrouter.ai/api/v1).
+ *
+ * OpenRouter's responses endpoint is largely OpenAI-compatible. This resolver keeps
+ * the shape pass-through and only applies OpenRouter-specific option normalization.
+ */
+export class OpenRouterResponseDialectResolver implements DialectResolver<
+  ResponseInputItem,
+  ResponseStreamEvent,
+  ResponseCreateParams,
+  Response
+> {
+  match(_model: string, baseUrl: string): boolean {
+    const normalized = normalizeUrl(baseUrl);
+    return normalized === OPENROUTER_RESPONSES_ENDPOINT;
+  }
+
+  manipulateOptions(options: ModelOptions, parameters: ResponseCreateParams): ResponseCreateParams {
+    if (!options.thinkEffort) return parameters;
+
+    // Keep effort mapping aligned with OpenRouter Responses `reasoning.effort`.
+    const effortMap: Record<string, 'none' | 'low' | 'medium' | 'high' | 'xhigh'> = {
+      disable: 'none',
+      low: 'low',
+      medium: 'medium',
+      high: 'high',
+      extreme: 'xhigh',
+    };
+    const effort = effortMap[options.thinkEffort];
+    if (!effort) return parameters;
+
+    return {
+      ...parameters,
+      reasoning: {
+        ...(parameters.reasoning ?? {}),
+        effort,
+      },
+    };
+  }
+
+  manipulateRawMessage(rawMsg: ResponseInputItem, _msg?: SessionMessage): ResponseInputItem {
+    return rawMsg;
+  }
+
+  manipulateMessage(msg: SessionMessage, _rawMsg: ResponseInputItem): SessionMessage {
+    return msg;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  extractFromDelta(_data: 'reasoning' | string, _delta: ResponseStreamEvent): any {
+    return undefined;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  extractFromResponse(_data: string, _response: Response): any {
+    return undefined;
+  }
+}
+
+/**
+ * Dialect resolver for OpenRouter via Anthropic Messages API endpoint
+ * (https://openrouter.ai/api/v1/messages).
+ *
+ * OpenRouter's Anthropic endpoint is largely Anthropic-compatible, so we only
+ * keep a light pass-through dialect hook for transport unification.
+ */
+export class OpenRouterAnthropicDialectResolver implements DialectResolver<
+  MessageParam,
+  RawContentBlockDelta,
+  MessageStreamParams,
+  Message
+> {
+  match(_model: string, baseUrl: string): boolean {
+    return normalizeUrl(baseUrl) === OPENROUTER_ANTHROPIC_MESSAGES_ENDPOINT;
+  }
+
+  manipulateOptions(_options: ModelOptions, parameters: MessageStreamParams): MessageStreamParams {
+    return parameters;
+  }
+
+  manipulateRawMessage(rawMsg: MessageParam, _msg?: SessionMessage): MessageParam {
+    return rawMsg;
+  }
+
+  manipulateMessage(msg: SessionMessage, _rawMsg: MessageParam): SessionMessage {
+    return msg;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  extractFromDelta(_data: 'reasoning' | string, _delta: RawContentBlockDelta): any {
+    return undefined;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  extractFromResponse(_data: string, _response: Message): any {
     return undefined;
   }
 }

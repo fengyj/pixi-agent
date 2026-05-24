@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/pixiagent-core" }
+    { "path": "packages/pixiagent-core" },
+    { "path": "packages/pixiagent-tui-demo" }
   ]
 }

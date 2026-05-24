@@ -23,17 +23,16 @@ import {
 import { ToolRegistry } from './tool';
 import { Observation } from './observation';
 import type { Span } from '@opentelemetry/api';
-import { AgentInterruptedError, ApiModeResolutionError } from './errors/types';
+import { AgentInterruptedError, ApiModeResolutionError, InvalidMessageError } from './errors/types';
 import { ModelResponse } from './transports/base';
 
-const logger = Observation.getLogger('agent');
 const trace = Observation.getTracer('pixiagent.agent');
 const { withSpan, retry } = Observation.helpers;
 
 export class PixiAgent {
-  private readonly logger: ReturnType<typeof logger.child>;
+  private readonly logger: ReturnType<ReturnType<typeof Observation.getLogger>['child']>;
   private _transport: ProviderTransport<RawMessageType>;
-  private convertedMessagesCache = new Map<string, RawMessageType>();
+  private convertedMessagesCache = new Map<string, RawMessageType | RawMessageType[]>();
   private transportCache = new Map<string, ProviderTransport<RawMessageType>>();
   private abortController = new AbortController();
   private isRunning = false;
@@ -47,7 +46,7 @@ export class PixiAgent {
       sessionThread.threadInfo.modelOptions,
     );
     this._transport = PixiAgent.getTransport(sessionThread.threadInfo.modelOptions);
-    this.logger = logger.child({
+    this.logger = Observation.getLogger('agent').child({
       sessionId: sessionThread.session.sessionId,
       threadId: sessionThread.threadInfo.threadId,
     });
@@ -252,7 +251,8 @@ export class PixiAgent {
     modelOptions: ModelOptions,
     input: SessionMessage,
   ): InternalMessage {
-    const rawRequestMessage = transport.convertToRawMessage(input);
+    const converted = transport.convertToRawMessage(input);
+    const rawRequestMessage = this.getSingleRawMessage(converted, input.role, 'request');
     const requestInternalMsg = this.sessionThread.addMessage(
       input.role,
       rawRequestMessage,
@@ -602,17 +602,20 @@ export class PixiAgent {
       name: sessionMessage.name,
       content: resultParts,
     } as SessionMessage;
-    const rawResultMsg = transport.convertToRawMessage(resultMsg);
-    historyMessages.push(rawResultMsg);
-    const resultInternalMsg = this.sessionThread.addMessage(
-      resultMsg.role,
-      rawResultMsg,
-      modelOptions,
-    );
-    this.logger.info(
-      PixiAgent.getMessageLogData(modelOptions, resultMsg, resultInternalMsg),
-      'Tool calls completed',
-    );
+    const rawResultMessages = this.toRawMessageArray(transport.convertToRawMessage(resultMsg));
+    historyMessages.push(...rawResultMessages);
+
+    for (const rawResultMsg of rawResultMessages) {
+      const resultInternalMsg = this.sessionThread.addMessage(
+        resultMsg.role,
+        rawResultMsg,
+        modelOptions,
+      );
+      this.logger.info(
+        PixiAgent.getMessageLogData(modelOptions, resultMsg, resultInternalMsg),
+        'Tool calls completed',
+      );
+    }
   }
 
   private throwIfInterrupted(defaultReason: string): void {
@@ -676,7 +679,12 @@ export class PixiAgent {
     for (const msg of this.sessionThread.threadMessages) {
       if (modelOptions.apiMode !== msg.apiMode || modelOptions.baseUrl !== msg.baseUrl) {
         if (this.convertedMessagesCache.has(msg.internalMessageId)) {
-          messages.push(this.convertedMessagesCache.get(msg.internalMessageId)!);
+          const cached = this.convertedMessagesCache.get(msg.internalMessageId)!;
+          if (msg.role === 'tool') {
+            messages.push(...this.toRawMessageArray(cached));
+          } else {
+            messages.push(this.getSingleRawMessage(cached, msg.role, 'history cache'));
+          }
           continue;
         }
         // not comparing the model here, because there is no dialect resolver relies on the model for now.
@@ -693,12 +701,33 @@ export class PixiAgent {
         const sessionMsg = t.convertFromRawMessage(msg.rawMessage);
         const converted = transport.convertToRawMessage(sessionMsg);
         this.convertedMessagesCache.set(msg.internalMessageId, converted);
-        messages.push(converted);
+        if (msg.role === 'tool') {
+          messages.push(...this.toRawMessageArray(converted));
+        } else {
+          messages.push(this.getSingleRawMessage(converted, msg.role, 'history conversion'));
+        }
       } else {
         messages.push(msg.rawMessage);
       }
     }
     return messages;
+  }
+
+  private toRawMessageArray(rawMessage: RawMessageType | RawMessageType[]): RawMessageType[] {
+    return Array.isArray(rawMessage) ? rawMessage : [rawMessage];
+  }
+
+  private getSingleRawMessage(
+    rawMessage: RawMessageType | RawMessageType[],
+    role: SessionMessage['role'],
+    stage: 'request' | 'history cache' | 'history conversion',
+  ): RawMessageType {
+    if (Array.isArray(rawMessage)) {
+      throw new InvalidMessageError(
+        `Expected a single raw message for ${role} role at ${stage}, but got ${rawMessage.length}`,
+      );
+    }
+    return rawMessage;
   }
 
   private getTransport(options: ModelOptions): ProviderTransport<RawMessageType> {

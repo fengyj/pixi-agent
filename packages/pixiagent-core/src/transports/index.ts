@@ -5,7 +5,18 @@ import {
   ApiModeResolverRegistry,
   DialectResolverRegistry,
 } from './base';
-import { OpenRouterApiModeResolver, OpenRouterChatDialectResolver } from './dialects/openrouter';
+import {
+  OpenRouterApiModeResolver,
+  OpenRouterAnthropicDialectResolver,
+  OpenRouterChatDialectResolver,
+  OpenRouterResponseDialectResolver,
+} from './dialects/openrouter';
+import {
+  OfoxApiModeResolver,
+  OfoxAnthropicDialectResolver,
+  OfoxChatDialectResolver,
+  OfoxResponseDialectResolver,
+} from './dialects/ofox';
 import {
   DeepSeekApiModeResolver,
   DeepSeekChatDialectResolver,
@@ -13,6 +24,7 @@ import {
 } from './dialects/deepseek';
 import { ChatCompletionTransport } from './chat_completion';
 import { AnthropicTransport } from './anthropic';
+import { ResponseTransport } from './response';
 
 export const Transport = {
   getTransport(
@@ -26,8 +38,7 @@ export const Transport = {
       case ApiModes.COMPLETIONS:
         return new ChatCompletionTransport(baseUrl, apiKey, dialectResolver);
       case ApiModes.RESPONSE:
-        // return new ResponseTransport();
-        throw new Error('ResponseTransport is not implemented yet.');
+        return new ResponseTransport(baseUrl, apiKey, dialectResolver);
       case ApiModes.ANTHROPIC:
         return new AnthropicTransport(baseUrl, apiKey, dialectResolver);
       case ApiModes.BEDROCK:
@@ -40,9 +51,15 @@ export const Transport = {
   },
   GlobalApiModeResolverRegistry: new ApiModeResolverRegistry()
     .registerResolver(new OpenRouterApiModeResolver())
+    .registerResolver(new OfoxApiModeResolver())
     .registerResolver(new DeepSeekApiModeResolver()),
   GlobalDialectResolverRegistry: new DialectResolverRegistry()
     .registerResolver(new OpenRouterChatDialectResolver())
+    .registerResolver(new OpenRouterResponseDialectResolver())
+    .registerResolver(new OpenRouterAnthropicDialectResolver())
+    .registerResolver(new OfoxChatDialectResolver())
+    .registerResolver(new OfoxResponseDialectResolver())
+    .registerResolver(new OfoxAnthropicDialectResolver())
     .registerResolver(new DeepSeekChatDialectResolver())
     .registerResolver(new DeepSeekAnthropicDialectResolver()),
 };

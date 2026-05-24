@@ -116,8 +116,10 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
   extractFromResponse(
     data: 'cache_read_tokens' | 'cache_created_tokens' | string,
     response: ChatCompletion,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): any {
     if (data === 'cache_read_tokens') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (response.usage as any)?.prompt_cache_hit_tokens ?? undefined;
     }
     return undefined;

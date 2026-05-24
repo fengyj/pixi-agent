@@ -45,6 +45,17 @@ import { OpenAI } from 'openai/client';
 
 export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMessageParam> {
   readonly client: OpenAI;
+  private static readonly OFFICIAL_BASE_URL = 'https://api.openai.com/v1';
+  private readonly configuredBaseUrl?: string;
+
+  private static normalizeBaseUrl(baseUrl?: string): string | undefined {
+    if (!baseUrl) return baseUrl;
+    const normalized = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+    if (normalized.toLowerCase().endsWith('/chat/completions')) {
+      return normalized.slice(0, -'/chat/completions'.length);
+    }
+    return normalized;
+  }
 
   constructor(
     baseUrl?: string,
@@ -57,8 +68,9 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     >,
   ) {
     super(ApiModes.COMPLETIONS, dialectResolver);
+    this.configuredBaseUrl = ChatCompletionTransport.normalizeBaseUrl(baseUrl);
     this.client = new OpenAI({
-      baseURL: baseUrl,
+      baseURL: this.configuredBaseUrl,
       apiKey: apiKey,
     });
   }
@@ -433,7 +445,9 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     } as ChatCompletionUserMessageParam;
   }
 
-  private getToolMessageParam(msg: SessionMessage): ChatCompletionToolMessageParam {
+  private getToolMessageParam(
+    msg: SessionMessage,
+  ): ChatCompletionMessageParam | ChatCompletionMessageParam[] {
     if (msg.role !== 'tool') {
       throw new InvalidMessageError(`Message role must be tool, but got ${msg.role}`);
     }
@@ -442,24 +456,34 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
       throw new InvalidMessageError('Tool message content must be a non-empty array of content parts.');
     }
 
-    const toolResults = msg.content
-      .filter((part) => part.type === 'tool_result')
-      .map((part) => part as ToolResultPart);
+    const toolResults = msg.content.filter((part) => part.type === 'tool_result') as ToolResultPart[];
+    const otherParts = msg.content.filter((part) => part.type !== 'tool_result');
 
-    if (toolResults.length !== 1) {
-      throw new InvalidMessageError('Tool message content must have exactly one tool result part.');
+    if (toolResults.length === 0) {
+      throw new InvalidMessageError('Tool message content must have at least one tool result part.');
     }
 
-    const toolResult = toolResults[0];
-    return {
+    const rawMessages: ChatCompletionMessageParam[] = toolResults.map((toolResult) => ({
       role: 'tool',
       tool_call_id: toolResult.id,
       content: toolResult.result,
-    };
+    }));
+
+    if (otherParts.length > 0) {
+      rawMessages.push(
+        this.getUserMessageParam({
+          ...msg,
+          role: 'user',
+          content: otherParts,
+        } as SessionMessage),
+      );
+    }
+
+    return rawMessages.length === 1 ? rawMessages[0] : rawMessages;
   }
 
-  convertToRawMessage(msg: SessionMessage): ChatCompletionMessageParam {
-    const rawMsg = (() => {
+  convertToRawMessage(msg: SessionMessage): ChatCompletionMessageParam | ChatCompletionMessageParam[] {
+    const raw = (() => {
       switch (msg.role) {
         case 'assistant':
           return this.getAssistantMessageParam(msg);
@@ -471,7 +495,293 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
           throw new InvalidMessageError(`Unsupported message role: ${msg.role}`);
       }
     })();
-    return this.dialectResolver ? this.dialectResolver.manipulateRawMessage(rawMsg, msg) : rawMsg;
+
+    if (!this.dialectResolver) {
+      return raw;
+    }
+    if (Array.isArray(raw)) {
+      const manipulated = raw.map((rawMsg) => this.dialectResolver!.manipulateRawMessage(rawMsg, msg));
+      return manipulated.length === 1 ? manipulated[0] : manipulated;
+    }
+    return this.dialectResolver.manipulateRawMessage(raw, msg);
+  }
+
+  private isOfficialService(): boolean {
+    const normalized =
+      ChatCompletionTransport.normalizeBaseUrl(this.configuredBaseUrl)?.toLowerCase();
+    return !normalized || normalized === ChatCompletionTransport.OFFICIAL_BASE_URL;
+  }
+
+  private getStreamRequestOptions(requestOptions?: ModelRequestOptions): {
+    signal?: AbortSignal;
+    timeout?: number;
+  } {
+    const streamRequestOptions: {
+      signal?: AbortSignal;
+      timeout?: number;
+    } = {};
+    if (requestOptions?.signal) {
+      streamRequestOptions.signal = requestOptions.signal;
+    }
+    if (typeof requestOptions?.timeout === 'number') {
+      streamRequestOptions.timeout = requestOptions.timeout;
+    }
+    return streamRequestOptions;
+  }
+
+  private buildModelResponse(
+    response: ChatCompletion,
+    responseMessage: ChatCompletionMessageParam,
+  ): ModelResponse<ChatCompletionMessageParam> {
+    return {
+      responseId: response.id,
+      responseMessage,
+      responseModel: response.model,
+      stopReason:
+        this.dialectResolver?.extractFromResponse('stop_reason', response) ??
+        this.getStopReason(response.choices[0]?.finish_reason),
+      refusal:
+        responseMessage.role === 'assistant' && 'refusal' in responseMessage
+          ? (responseMessage.refusal ?? undefined)
+          : undefined,
+      usage: response.usage
+        ? {
+            inputTokens: response.usage.prompt_tokens,
+            outputTokens: response.usage.completion_tokens,
+            totalTokens: response.usage.total_tokens,
+            reasoningTokens:
+              this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ??
+              response.usage.completion_tokens_details?.reasoning_tokens ??
+              undefined,
+            cacheReadTokens:
+              this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
+              response.usage.prompt_tokens_details?.cached_tokens ??
+              undefined,
+            cacheCreatedTokens:
+              this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
+              undefined,
+            inputTokenDetails: response.usage.prompt_tokens_details
+              ? { ...response.usage.prompt_tokens_details }
+              : undefined,
+            outputTokenDetails: response.usage.completion_tokens_details
+              ? { ...response.usage.completion_tokens_details }
+              : undefined,
+          }
+        : undefined,
+    } as ModelResponse<ChatCompletionMessageParam>;
+  }
+
+  private async generateWithOfficialStream(
+    params: ChatCompletionStreamParams,
+    callbacks?: StreamCallbacks,
+    requestOptions?: ModelRequestOptions,
+  ): Promise<ModelResponse<ChatCompletionMessageParam>> {
+    let textChunkStarted = false;
+    let thinkingChunkStarted = false;
+    let thinkingText = '';
+
+    const response = await this.client.chat.completions
+      .stream(params, this.getStreamRequestOptions(requestOptions))
+      .on('chunk', (chunk) => {
+        const choice = chunk.choices[0];
+        if (!choice) return;
+
+        const delta = choice.delta;
+
+        const reasoningDelta: string | null | undefined = this.dialectResolver?.extractFromDelta(
+          'reasoning',
+          delta,
+        );
+        if (reasoningDelta) {
+          thinkingText += reasoningDelta;
+          if (!thinkingChunkStarted) {
+            thinkingChunkStarted = true;
+            callbacks?.onThinkingChunk?.(reasoningDelta, 'begin');
+          } else {
+            callbacks?.onThinkingChunk?.(reasoningDelta);
+          }
+        }
+
+        const textDelta: string | null | undefined = delta.content;
+        if (textDelta) {
+          if (thinkingChunkStarted) {
+            thinkingChunkStarted = false;
+            callbacks?.onThinkingChunk?.('', 'end');
+            callbacks?.onThinking?.(thinkingText);
+          }
+
+          if (!textChunkStarted) {
+            textChunkStarted = true;
+            callbacks?.onTextChunk?.(textDelta, 'begin');
+          } else {
+            callbacks?.onTextChunk?.(textDelta);
+          }
+        }
+
+        if (choice.finish_reason) {
+          if (textChunkStarted) {
+            textChunkStarted = false;
+            callbacks?.onTextChunk?.('', 'end');
+          }
+          if (thinkingChunkStarted) {
+            thinkingChunkStarted = false;
+            callbacks?.onThinkingChunk?.('', 'end');
+            callbacks?.onThinking?.(thinkingText);
+          }
+        }
+      })
+      .on('content', (content) => {
+        callbacks?.onText?.(content);
+      })
+      .on('finalFunctionToolCall', (toolCall) => {
+        callbacks?.onToolUse?.(toolCall.name, toolCall.arguments);
+      })
+      .on('error', (error) => {
+        callbacks?.onError?.(error);
+      })
+      .on('abort', (error) => {
+        callbacks?.onError?.(error);
+      })
+      .finalChatCompletion();
+
+    return this.buildModelResponse(
+      response,
+      response.choices[0].message as ChatCompletionMessageParam,
+    );
+  }
+
+  private async generateWithThirdPartyCreate(
+    params: ChatCompletionStreamParams,
+    callbacks?: StreamCallbacks,
+    requestOptions?: ModelRequestOptions,
+  ): Promise<ModelResponse<ChatCompletionMessageParam>> {
+    let textChunkStarted = false;
+    let thinkingChunkStarted = false;
+    let thinkingText = '';
+    let finalFinishReason: string | undefined;
+    let responseId = '';
+    let responseModel = params.model;
+    let responseUsage: ChatCompletion['usage'] | undefined;
+    let refusalText = '';
+    let assistantText = '';
+    const toolCalls = new Map<number, ChatCompletionMessageFunctionToolCall>();
+
+    const stream = await this.client.chat.completions.create(
+      { ...params, stream: true },
+      this.getStreamRequestOptions(requestOptions),
+    );
+
+    for await (const chunk of stream) {
+      responseId = chunk.id;
+      responseModel = chunk.model;
+      responseUsage = chunk.usage ?? responseUsage;
+
+      const choice = chunk.choices[0];
+      if (!choice) continue;
+
+      const delta = choice.delta;
+
+      const reasoningDelta: string | null | undefined = this.dialectResolver?.extractFromDelta(
+        'reasoning',
+        delta,
+      );
+      if (reasoningDelta) {
+        thinkingText += reasoningDelta;
+        if (!thinkingChunkStarted) {
+          thinkingChunkStarted = true;
+          callbacks?.onThinkingChunk?.(reasoningDelta, 'begin');
+        } else {
+          callbacks?.onThinkingChunk?.(reasoningDelta);
+        }
+      }
+
+      if (delta.content) {
+        if (thinkingChunkStarted) {
+          thinkingChunkStarted = false;
+          callbacks?.onThinkingChunk?.('', 'end');
+          callbacks?.onThinking?.(thinkingText);
+        }
+        assistantText += delta.content;
+        if (!textChunkStarted) {
+          textChunkStarted = true;
+          callbacks?.onTextChunk?.(delta.content, 'begin');
+        } else {
+          callbacks?.onTextChunk?.(delta.content);
+        }
+      }
+
+      if (delta.refusal) {
+        refusalText += delta.refusal;
+      }
+
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          const existing =
+            toolCalls.get(idx) ??
+            ({
+              type: 'function',
+              id: tc.id ?? '',
+              function: {
+                name: tc.function?.name ?? '',
+                arguments: tc.function?.arguments ?? '',
+              },
+            } as ChatCompletionMessageFunctionToolCall);
+
+          if (tc.id) {
+            existing.id = tc.id;
+          }
+          if (tc.function?.name) {
+            existing.function.name = tc.function.name;
+          }
+          if (tc.function?.arguments) {
+            existing.function.arguments += tc.function.arguments;
+          }
+          toolCalls.set(idx, existing);
+        }
+      }
+
+      if (choice.finish_reason) {
+        finalFinishReason = choice.finish_reason;
+      }
+    }
+
+    if (textChunkStarted) {
+      callbacks?.onTextChunk?.('', 'end');
+    }
+    if (thinkingChunkStarted) {
+      callbacks?.onThinkingChunk?.('', 'end');
+      callbacks?.onThinking?.(thinkingText);
+    }
+    if (assistantText) {
+      callbacks?.onText?.(assistantText);
+    }
+
+    const message: ChatCompletionAssistantMessageParam = {
+      role: 'assistant',
+      content: assistantText || null,
+      refusal: refusalText || undefined,
+      tool_calls: toolCalls.size > 0 ? [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v) : undefined,
+      audio: null,
+    };
+
+    const syntheticResponse = {
+      id: responseId || `chatcmpl_${Date.now().toString(36)}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: responseModel,
+      choices: [
+        {
+          index: 0,
+          finish_reason: finalFinishReason ?? 'stop',
+          logprobs: null,
+          message,
+        },
+      ],
+      usage: responseUsage,
+    } as unknown as ChatCompletion;
+
+    return this.buildModelResponse(syntheticResponse, message);
   }
 
   async generate(
@@ -481,121 +791,10 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     requestOptions?: ModelRequestOptions,
   ): Promise<ModelResponse<ChatCompletionMessageParam>> {
     const params = this.getChatCompletionStreamParams(options, messages);
-
-    let textChunkStarted = false;
-    let thinkingChunkStarted = false;
-    let thinkingText = '';
-
     try {
-      const response = await this.client.chat.completions
-        .stream(params, requestOptions)
-        .on('chunk', (chunk) => {
-          const choice = chunk.choices[0];
-          if (!choice) return;
-
-          const delta = choice.delta;
-
-          // Handle thinking/reasoning content (provider-specific field, extracted via dialect)
-          const reasoningDelta: string | null | undefined = this.dialectResolver?.extractFromDelta(
-            'reasoning',
-            delta,
-          );
-          if (reasoningDelta) {
-            thinkingText += reasoningDelta;
-            if (!thinkingChunkStarted) {
-              thinkingChunkStarted = true;
-              callbacks?.onThinkingChunk?.(reasoningDelta, 'begin');
-            } else {
-              callbacks?.onThinkingChunk?.(reasoningDelta);
-            }
-          }
-
-          // Handle text content
-          const textDelta: string | null | undefined = delta.content;
-          if (textDelta) {
-            // If thinking was active, signal its end before text begins
-            if (thinkingChunkStarted) {
-              thinkingChunkStarted = false;
-              callbacks?.onThinkingChunk?.('', 'end');
-              callbacks?.onThinking?.(thinkingText);
-            }
-
-            if (!textChunkStarted) {
-              textChunkStarted = true;
-              callbacks?.onTextChunk?.(textDelta, 'begin');
-            } else {
-              callbacks?.onTextChunk?.(textDelta);
-            }
-          }
-
-          // Handle stream finish
-          if (choice.finish_reason) {
-            if (textChunkStarted) {
-              textChunkStarted = false;
-              callbacks?.onTextChunk?.('', 'end');
-            }
-            if (thinkingChunkStarted) {
-              thinkingChunkStarted = false;
-              callbacks?.onThinkingChunk?.('', 'end');
-              callbacks?.onThinking?.(thinkingText);
-            }
-          }
-        })
-        .on('content', (content) => {
-          if (callbacks?.onText) {
-            callbacks.onText(content);
-          }
-        })
-        .on('finalFunctionToolCall', (toolCall) => {
-          if (callbacks?.onToolUse) {
-            callbacks.onToolUse(toolCall.name, toolCall.arguments);
-          }
-        })
-        .on('error', (error) => {
-          if (callbacks?.onError) {
-            callbacks.onError(error);
-          }
-        })
-        .on('abort', (error) => {
-          if (callbacks?.onError) {
-            callbacks.onError(error);
-          }
-        })
-        .finalChatCompletion();
-
-      return {
-        responseId: response.id,
-        responseMessage: response.choices[0].message as ChatCompletionMessageParam,
-        responseModel: response.model,
-        stopReason:
-          this.dialectResolver?.extractFromResponse('stop_reason', response) ??
-          this.getStopReason(response.choices[0].finish_reason),
-        refusal: response.choices[0].message.refusal ?? undefined,
-        usage: response.usage
-          ? {
-              inputTokens: response.usage.prompt_tokens,
-              outputTokens: response.usage.completion_tokens,
-              totalTokens: response.usage.total_tokens,
-              reasoningTokens:
-                this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ??
-                response.usage.completion_tokens_details?.reasoning_tokens ??
-                undefined,
-              cacheReadTokens:
-                this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
-                response.usage.prompt_tokens_details?.cached_tokens ??
-                undefined,
-              cacheCreatedTokens:
-                this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
-                undefined,
-              inputTokenDetails: response.usage.prompt_tokens_details
-                ? { ...response.usage.prompt_tokens_details }
-                : undefined,
-              outputTokenDetails: response.usage.completion_tokens_details
-                ? { ...response.usage.completion_tokens_details }
-                : undefined,
-            }
-          : undefined,
-      } as ModelResponse<ChatCompletionMessageParam>;
+      return this.isOfficialService()
+        ? await this.generateWithOfficialStream(params, callbacks, requestOptions)
+        : await this.generateWithThirdPartyCreate(params, callbacks, requestOptions);
     } catch (error) {
       throw this.wrapRequestError(error, requestOptions);
     }

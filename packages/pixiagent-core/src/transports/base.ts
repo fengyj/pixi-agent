@@ -27,9 +27,23 @@ export abstract class ProviderTransport<TRawMessage> {
     >,
   ) {}
 
+  /**
+   * Convert the raw message to SessionMessage.
+   * 
+   * @param rawMsg 
+   */
   abstract convertFromRawMessage(rawMsg: TRawMessage): SessionMessage;
 
-  abstract convertToRawMessage(msg: SessionMessage): TRawMessage;
+  /**
+   * Convert the SessionMessage to raw message(s).
+   * When the SessionMessage is tool message, and when it's converted to ChatCompletion/Response
+   * message, because the API's tool result message only supports one tool result,
+   * so the SessionMessage will be converted to multiple raw messages, one for each tool result, 
+   * and if the message contains any other content besides the tool result, 
+   * it will be converted to one more raw user message.
+   * @param msg 
+   */
+  abstract convertToRawMessage(msg: SessionMessage): TRawMessage | TRawMessage[];
 
   abstract generate(
     options: ModelOptions,
@@ -198,7 +212,7 @@ export abstract class ApiModeResolver {
  */
 export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters, TRawResponse> {
   /**
-   * Infer the dialect from the model, api mode and the baseUrl.
+   * Infer the dialect from the model and the baseUrl.
    * @param model
    * @param baseUrl
    */

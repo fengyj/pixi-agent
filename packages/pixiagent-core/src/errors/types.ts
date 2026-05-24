@@ -62,7 +62,7 @@ export class PixiAgentTimeoutError extends PixiAgentRetriableError {
  */
 export class ModelRequestTimeoutError extends PixiAgentTimeoutError {
   constructor(
-    public readonly provider: 'openai' | 'anthropic' | string,
+    public readonly provider: string,
     timeoutMs?: number,
     cause?: unknown,
   ) {

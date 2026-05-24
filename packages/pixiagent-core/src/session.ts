@@ -63,6 +63,10 @@ export type Session = {
    * so that the UI can automatically switch to the new thread for the next-turn conversation.
    */
   defaultThread: string;
+  /** 
+   * Session level total usage
+   */
+  totalUsage: UsageStats;
   /**
    * Can be used to store any extra information.
    * For example, if want to use a database to store the session data,
@@ -127,6 +131,10 @@ export type SessionThreadInfo = {
    * we may know if needs to use a new transports or a new dialect.
    */
   modelOptions: ModelOptions;
+  /**
+   * The thread level usage
+   */
+  totalUsage: UsageStats;
   createdAt: string;
   updatedAt: string;
 };
@@ -166,13 +174,15 @@ export class SessionThread {
       previousMessageId: lastMessageId,
       createdAt: createdAt,
       completedAt: now,
-      usage,
+      usage: usage,
     };
     this.threadMessages.push(newMessage);
     this.session.messages.push(newMessage);
     this.session.updatedAt = now;
     this.threadInfo.headMessageId = newMessage.internalMessageId;
     this.threadInfo.updatedAt = now;
+    this.threadInfo.totalUsage = UsageStats.sum(this.threadInfo.totalUsage, usage);
+    this.session.totalUsage = UsageStats.sum(this.session.totalUsage, usage);
     return newMessage;
   }
 }
@@ -271,6 +281,7 @@ function createSession(
     messages: [],
     threads: [],
     defaultThread: getSeqId(sessionId, 1),
+    totalUsage: UsageStats.empty(),
   };
   forkThread(session, undefined, false, options.modelOptions);
   return session;
@@ -342,6 +353,7 @@ function forkThread(
     rootMessageId: includeHistory ? undefined : fromMessageId,
     headMessageId: fromMessageId,
     modelOptions: modelOptions,
+    totalUsage: UsageStats.empty(),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { defineTool, Tool } from '@pixiagent/core/tool';
+import { defineTool, Tool } from '../../../src/tool';
 
 const generateFutureWeather = () => {
   const today = new Date();

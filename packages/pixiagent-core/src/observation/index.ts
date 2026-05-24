@@ -497,6 +497,12 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
       logging,
     } = options;
 
+    const outputToOtel = logging && 'rootLogger' in logging
+      ? false
+      : logging && ('outputToOtel' in logging)
+      ? logging.outputToOtel !== false
+      : transport !== 'none';
+
     if (transport !== 'none' && !transportEndpoint) {
       throw new Error(`[observation] transportEndpoint is required when transport is '${transport}'.`); // should be caught by TypeScript but added here for runtime safety
     }
@@ -509,11 +515,9 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
       serviceVersion = logging.serviceVersion ?? DEFAULT_SERVICE_VERSION;
     }
 
-    const outputToOtel = logging && 'rootLogger' in logging
-      ? false
-      : logging && ('outputToOtel' in logging)
-      ? logging.outputToOtel !== false
-      : transport !== 'none';
+    const outputToConsole = logging && !('rootLogger' in logging) && !('logOptions' in logging)
+      ? logging.outputToConsole !== false
+      : true;
 
     let logOptionsWithOtelTransport: pino.LoggerOptions | undefined;
 
@@ -575,7 +579,9 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
         'service.version': serviceVersion,
       });
 
-      diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.ERROR);
+      if (outputToConsole) {
+        diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.ERROR);
+      }
 
       sdk = new NodeSDKClass({ resource, traceExporter, metricReaders });
       sdk.start();

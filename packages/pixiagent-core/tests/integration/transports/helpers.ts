@@ -10,6 +10,7 @@
 
 import { expect } from 'vitest';
 import {
+  ApiModes,
   SessionMessage,
   ThinkingPart,
   ToolCallPart,
@@ -17,8 +18,8 @@ import {
   TextPart,
   RawMessageType,
   UsageStats,
-} from '@pixiagent/core/message';
-import { ProviderTransport, ModelOptions, StreamCallbacks } from '@pixiagent/core/transports/base';
+} from '../../../src/message';
+import { ProviderTransport, ModelOptions, StreamCallbacks } from '../../../src/transports/base';
 import { fakeToolset, executeToolCall } from '../poc/tools';
 
 // ── option builders ──────────────────────────────────────────────────────────
@@ -85,7 +86,10 @@ export function sessionMessagesToRawMessages(
   transport: ProviderTransport<RawMessageType>,
   messages: SessionMessage[],
 ): RawMessageType[] {
-  return messages.map((msg) => transport.convertToRawMessage(msg));
+  return messages.flatMap((msg) => {
+    const raw = transport.convertToRawMessage(msg);
+    return Array.isArray(raw) ? raw : [raw];
+  });
 }
 
 /**
@@ -241,6 +245,121 @@ export function assertThinkingDeltaMatchesFinalMessage(
   ).toBe(finalThinking);
 }
 
+function getAllText(content?: string | Array<TextPart | ToolCallPart | ToolResultPart>): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  return content
+    .filter((p): p is TextPart => p.type === 'text')
+    .map((p) => p.text)
+    .join('');
+}
+
+/**
+ * Validate core session/raw conversion in both directions for a transport.
+ */
+export function assertBidirectionalConversion(
+  transport: ProviderTransport<RawMessageType>,
+): void {
+  const userMsg: SessionMessage = {
+    type: 'session_message',
+    role: 'user',
+    content: 'Hello transport conversion!',
+  };
+  const userRaw = transport.convertToRawMessage(userMsg) as RawMessageType;
+  const userRoundTrip = transport.convertFromRawMessage(userRaw);
+  expect(userRoundTrip.role).toBe('user');
+  expect(getAllText(userRoundTrip.content as string | Array<TextPart>)).toContain('Hello');
+
+  const assistantTextMsg: SessionMessage = {
+    type: 'session_message',
+    role: 'assistant',
+    content: [{ type: 'text', text: 'Round-trip assistant text.' }],
+  };
+  const assistantRaw = transport.convertToRawMessage(assistantTextMsg) as RawMessageType;
+  const assistantRoundTrip = transport.convertFromRawMessage(assistantRaw);
+  expect(assistantRoundTrip.role).toBe('assistant');
+  expect(getAllText(assistantRoundTrip.content as string | Array<TextPart>)).toContain(
+    'assistant text',
+  );
+
+  const assistantToolCall: SessionMessage = {
+    type: 'session_message',
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool_call',
+        id: 'call_1',
+        name: 'future_weather',
+        arguments: JSON.stringify({ days: 1 }),
+      },
+    ],
+  };
+  const toolCallRaw = transport.convertToRawMessage(assistantToolCall) as RawMessageType;
+  const toolCallRoundTrip = transport.convertFromRawMessage(toolCallRaw);
+  expect(toolCallRoundTrip.role).toBe('assistant');
+  expect(Array.isArray(toolCallRoundTrip.content)).toBe(true);
+  const roundTripToolCall = (toolCallRoundTrip.content as Array<ToolCallPart>).find(
+    (p) => p.type === 'tool_call',
+  );
+  expect(roundTripToolCall?.name).toBe('future_weather');
+
+  const toolResultMsg: SessionMessage = {
+    type: 'session_message',
+    role: 'tool',
+    content: [
+      {
+        type: 'tool_result',
+        id: 'call_1',
+        name: 'future_weather',
+        result: JSON.stringify({ temp: 23 }),
+      },
+    ],
+  };
+  const toolResultRaw = transport.convertToRawMessage(toolResultMsg);
+  const toolResultRaws = Array.isArray(toolResultRaw) ? toolResultRaw : [toolResultRaw];
+  const toolResultRoundTrips = toolResultRaws.map((raw) => transport.convertFromRawMessage(raw));
+  const roundTripToolResults = toolResultRoundTrips.flatMap((msg) =>
+    Array.isArray(msg.content)
+      ? msg.content.filter((p): p is ToolResultPart => p.type === 'tool_result')
+      : [],
+  );
+  expect(roundTripToolResults.some((p) => p.id === 'call_1')).toBe(true);
+
+  const multiToolResultMsg: SessionMessage = {
+    type: 'session_message',
+    role: 'tool',
+    content: [
+      {
+        type: 'tool_result',
+        id: 'call_1',
+        name: 'future_weather',
+        result: JSON.stringify({ temp: 23 }),
+      },
+      {
+        type: 'tool_result',
+        id: 'call_2',
+        name: 'stock_ohlc',
+        result: JSON.stringify({ close: 105 }),
+      },
+    ],
+  };
+  const multiRaw = transport.convertToRawMessage(multiToolResultMsg);
+  const multiRaws = Array.isArray(multiRaw) ? multiRaw : [multiRaw];
+  if (transport.apiMode === ApiModes.ANTHROPIC) {
+    expect(multiRaws.length).toBe(1);
+  } else {
+    expect(multiRaws.length).toBe(2);
+  }
+  const multiRoundTrips = multiRaws.map((raw) => transport.convertFromRawMessage(raw));
+  const multiRoundTripResults = multiRoundTrips.flatMap((msg) =>
+    Array.isArray(msg.content)
+      ? msg.content.filter((p): p is ToolResultPart => p.type === 'tool_result')
+      : [],
+  );
+  expect(multiRoundTripResults.some((p) => p.id === 'call_1')).toBe(true);
+  expect(multiRoundTripResults.some((p) => p.id === 'call_2')).toBe(true);
+}
+
 // ── the 4-turn conversation runner ───────────────────────────────────────────
 
 /**
@@ -258,6 +377,7 @@ export async function runStandardConversation(
   opts: {
     supportsReasoning?: boolean;
     reasoningModel?: string;
+      reasoningInFinalMessage?: boolean;
     extraOptions?: Partial<ModelOptions>;
   } = {},
 ) {
@@ -396,7 +516,9 @@ export async function runStandardConversation(
     assertTextStreamed(collected);
     assertTextDeltaMatchesFinalMessage(collected, transport, result.responseMessage);
     assertThinkingStreamed(collected);
-    assertThinkingInConvertedMessage(transport, result.responseMessage);
-    assertThinkingDeltaMatchesFinalMessage(collected, transport, result.responseMessage);
+    if (opts.reasoningInFinalMessage ?? true) {
+      assertThinkingInConvertedMessage(transport, result.responseMessage);
+      assertThinkingDeltaMatchesFinalMessage(collected, transport, result.responseMessage);
+    }
   }
 }

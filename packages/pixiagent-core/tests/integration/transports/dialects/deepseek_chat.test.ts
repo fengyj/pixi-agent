@@ -17,6 +17,7 @@ import { runStandardConversation } from '../helpers';
 const API_KEY = process.env.DEEPSEEK_API_KEY;
 const BASE_URL = 'https://api.deepseek.com';
 const MODEL = 'deepseek-v4-flash';
+const REASONING_MODEL = 'deepseek-reasoner';
 
 describe.skipIf(!API_KEY)('ChatCompletionTransport + DeepSeekChatDialectResolver', () => {
   const transport = new ChatCompletionTransport(BASE_URL, API_KEY, new DeepSeekChatDialectResolver());
@@ -24,7 +25,11 @@ describe.skipIf(!API_KEY)('ChatCompletionTransport + DeepSeekChatDialectResolver
   it(
     'runs the standard 4-turn conversation including reasoning',
     async () => {
-      await runStandardConversation(transport, MODEL, { supportsReasoning: true });
+      await runStandardConversation(transport, MODEL, {
+        supportsReasoning: true,
+        reasoningModel: REASONING_MODEL,
+        reasoningInFinalMessage: false,
+      });
     },
     120_000,
   );
