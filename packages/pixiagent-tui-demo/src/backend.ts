@@ -1,8 +1,17 @@
-import { PixiAgent } from '@pixiagent/core/agent';
-import type { InternalMessage, SessionMessage, UsageStats } from '@pixiagent/core/message';
-import { Session } from '@pixiagent/core/session';
-import { ToolRegistry } from '@pixiagent/core/tool';
-import type { ModelOptions } from '@pixiagent/core/transports';
+import type { 
+  InternalMessage, 
+  SessionMessage, 
+} from '@pixiagent/core';
+import { 
+  PixiAgent,
+  UsageStats,  
+  Session,
+  Tools,
+  Transports,
+} from '@pixiagent/core';
+
+type ModelOptions = Transports.ModelOptions;
+const ToolRegistry = Tools.ToolRegistry;
 
 export type ChatResponse = {
   text: string;
@@ -12,6 +21,7 @@ export type ChatResponse = {
 
 export type ChatBackend = {
   sendUserMessage(input: string): Promise<ChatResponse>;
+  interrupt(reason?: string): void;
 };
 
 function extractAssistantText(rawMessage: unknown): string {
@@ -69,17 +79,6 @@ function findLastAssistantMessage(messages: InternalMessage[]): InternalMessage 
   return undefined;
 }
 
-function createEmptyUsage(): UsageStats {
-  return {
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-    cacheReadTokens: 0,
-    cacheCreatedTokens: 0,
-    reasoningTokens: 0,
-  };
-}
-
 function normalizeUsage(usage: UsageStats | undefined): UsageStats {
   return {
     inputTokens: usage?.inputTokens ?? 0,
@@ -129,12 +128,18 @@ export class PixiAgentBackend implements ChatBackend {
     const sessionUsage = normalizeUsage(this.agent.sessionThread.session.totalUsage);
 
     const lastAssistant = findLastAssistantMessage(this.agent.sessionThread.threadMessages);
-    const text = lastAssistant ? extractAssistantText(lastAssistant.rawMessage) : '(assistant did not return a message)';
+    const text = lastAssistant
+      ? extractAssistantText(lastAssistant.rawMessage)
+      : '(assistant did not return a message)';
 
     return {
       text,
       usage: requestUsage,
       sessionUsage,
     };
+  }
+
+  interrupt(reason?: string): void {
+    this.agent.interrupt(reason);
   }
 }

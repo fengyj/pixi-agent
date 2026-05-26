@@ -5,6 +5,8 @@ dist/
 **/dist/
 .vscode/
 .DS_Store
+*.tsbuildinfo
+**/*.tsbuildinfo
 coverage/
 .env
 .env.*

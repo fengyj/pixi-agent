@@ -11,12 +11,12 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 - Provide a clean core agent lifecycle and message-handling foundation.
 - Support plugin hooks, extensible actions, and application integration.
-- Keep package setup compatible with Bun monorepo workflows.
+- Keep package setup compatible with pnpm monorepo workflows.
 
 ## Development Environment
 
-- Use `bun` instead of `npm`.
-- Use `vitest` instead of `jest` for testing. For example: `bun exec vitest run tests/integration/observation/observation.test.ts --config ../../vitest.integration.config.ts`.
+- Use `pnpm` instead of `npm`.
+- Use `vitest` instead of `jest` for testing. For example: `pnpm exec vitest run tests/integration/observation/observation.test.ts --config ../../vitest.integration.config.ts`.
 
 
 # Custom Commands

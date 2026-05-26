@@ -1,10 +1,5 @@
 import { SpanStatusCode, trace } from '@opentelemetry/api';
-import type {
-  Attributes,
-  Exception,
-  Span,
-  Tracer,
-} from '@opentelemetry/api';
+import type { Attributes, Exception, Span, Tracer } from '@opentelemetry/api';
 import { isRetriableError } from '../errors/guards';
 
 const DEFAULT_TRACER_NAME = 'pixiagent';
@@ -20,14 +15,13 @@ export interface SpanHelperOptions {
   setOkStatus?: boolean;
 }
 
-export interface TracedOptions<TArgs extends unknown[], TResult>
-  extends SpanHelperOptions {
+export interface TracedOptions<TArgs extends unknown[], TResult> extends SpanHelperOptions {
   name?: string;
   attrsFn?: (...args: TArgs) => Attributes;
   resultAttrsFn?: (result: TResult) => Attributes;
 }
 
-export interface RetryOptions extends SpanHelperOptions {
+export interface RetryOptions<T> extends SpanHelperOptions {
   span?: Span;
   maxAttempts?: number;
   initialDelayMs?: number;
@@ -36,10 +30,13 @@ export interface RetryOptions extends SpanHelperOptions {
   jitterRatio?: number;
   signal?: AbortSignal;
   shouldRetry?: (err: unknown, attempt: number, maxAttempts: number) => boolean;
+  defaultResultOnFailure?: (err: unknown) => Promise<T>;
 }
 
-export interface RetryDecoratorOptions<TArgs extends unknown[], TResult>
-  extends RetryOptions {
+export interface RetryDecoratorOptions<
+  TArgs extends unknown[],
+  TResult,
+> extends RetryOptions<TResult> {
   name?: string;
   attrsFn?: (...args: TArgs) => Attributes;
   resultAttrsFn?: (result: TResult) => Attributes;
@@ -131,7 +128,7 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function computeDelayMs(opts: RetryOptions, attempt: number): number {
+function computeDelayMs<T>(opts: RetryOptions<T>, attempt: number): number {
   const initialDelayMs = Math.max(0, opts.initialDelayMs ?? 200);
   const maxDelayMs = Math.max(initialDelayMs, opts.maxDelayMs ?? 5_000);
   const backoffMultiplier = Math.max(1, opts.backoffMultiplier ?? 2);
@@ -147,7 +144,7 @@ function computeDelayMs(opts: RetryOptions, attempt: number): number {
 async function executeWithRetrySpan<T>(
   span: Span,
   fn: (ctx: { span: Span; attempt: number }) => Promise<T> | T,
-  opts: RetryOptions,
+  opts: RetryOptions<T>,
 ): Promise<T> {
   const requestedAttempts = opts.maxAttempts;
   const maxAttempts =
@@ -191,9 +188,17 @@ async function executeWithRetrySpan<T>(
       });
 
       if (!canRetry) {
-        span.setAttribute('retry.give_up_at', attempt);
-        handleSpanError(span, err, opts.isExpectedError);
-        throw err;
+        if (opts.defaultResultOnFailure !== undefined) {
+          span.setAttribute('retry.give_up_with_default', true);
+          if (opts.setOkStatus) {
+            span.setStatus({ code: SpanStatusCode.OK });
+          }
+          return await opts.defaultResultOnFailure(err);
+        } else {
+          span.setAttribute('retry.give_up_at', attempt);
+          handleSpanError(span, err, opts.isExpectedError);
+          throw err;
+        }
       }
 
       const delayMs = computeDelayMs(opts, attempt);
@@ -234,7 +239,7 @@ export async function withSpan<T>(
 export async function retry<T>(
   name: string,
   fn: (ctx: { span: Span; attempt: number }) => Promise<T> | T,
-  opts: RetryOptions = {},
+  opts: RetryOptions<T> = {},
 ): Promise<T> {
   if (opts.span) {
     return executeWithRetrySpan(opts.span, fn, opts);
@@ -253,16 +258,15 @@ export async function retry<T>(
 export function Retry<TArgs extends unknown[], TResult = unknown>(
   opts: RetryDecoratorOptions<TArgs, TResult> = {},
 ): MethodDecorator {
-  return (function (
-    _target: object,
-    key: string | symbol,
-    descriptor: PropertyDescriptor,
-  ): void {
+  return function (_target: object, key: string | symbol, descriptor: PropertyDescriptor): void {
     if (typeof descriptor.value !== 'function') {
       throw new TypeError('@Retry can only be applied to methods.');
     }
 
-    const original = descriptor.value as (this: unknown, ...args: TArgs) => TResult | Promise<TResult>;
+    const original = descriptor.value as (
+      this: unknown,
+      ...args: TArgs
+    ) => TResult | Promise<TResult>;
 
     const wrapped = function (this: unknown, ...args: TArgs): Promise<TResult> {
       const spanFromArgs = opts.spanFromArgs?.(...args);
@@ -296,22 +300,21 @@ export function Retry<TArgs extends unknown[], TResult = unknown>(
     };
 
     descriptor.value = wrapped as (...args: TArgs) => TResult | Promise<TResult>;
-  }) as MethodDecorator;
+  } as MethodDecorator;
 }
 
 export function Traced<TArgs extends unknown[], TResult = unknown>(
   opts: TracedOptions<TArgs, TResult> = {},
 ): MethodDecorator {
-  return (function (
-    _target: object,
-    key: string | symbol,
-    descriptor: PropertyDescriptor,
-  ): void {
+  return function (_target: object, key: string | symbol, descriptor: PropertyDescriptor): void {
     if (typeof descriptor.value !== 'function') {
       throw new TypeError('@Traced can only be applied to methods.');
     }
 
-    const original = descriptor.value as (this: unknown, ...args: TArgs) => TResult | Promise<TResult>;
+    const original = descriptor.value as (
+      this: unknown,
+      ...args: TArgs
+    ) => TResult | Promise<TResult>;
 
     const wrapped = function (this: unknown, ...args: TArgs): TResult | Promise<TResult> {
       const spanName = opts.name ?? String(key);
@@ -357,5 +360,5 @@ export function Traced<TArgs extends unknown[], TResult = unknown>(
     };
 
     descriptor.value = wrapped as (...args: TArgs) => TResult | Promise<TResult>;
-  }) as MethodDecorator;
+  } as MethodDecorator;
 }

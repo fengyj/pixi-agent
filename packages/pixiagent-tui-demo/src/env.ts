@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ApiModes } from '@pixiagent/core/message';
-import type { ModelOptions } from '@pixiagent/core/transports';
-import type { ObservabilityOptions } from '@pixiagent/core/observation';
+import { ApiModes, Transports, Observation } from '@pixiagent/core';
+
+type ObservabilityOptions = Observation.ObservabilityOptions;
 
 type DemoObservabilityConfig = {
   enabled: boolean;
@@ -11,7 +11,7 @@ type DemoObservabilityConfig = {
 };
 
 export type DemoConfig = {
-  modelOptions: ModelOptions;
+  modelOptions: Transports.ModelOptions;
   modelRequestTimeout: number;
   maxIterations: number;
   maxModelRequestRetries: number;
@@ -116,12 +116,16 @@ export function loadConfigFromEnv(): DemoConfig {
   const otelTransport = normalizeTransport(merged.PIXIA_OTEL_TRANSPORT);
   const otelEndpoint = merged.PIXIA_OTEL_ENDPOINT;
   const otelEnableTelemetry = parseBoolean(merged.PIXIA_OTEL_ENABLE_TELEMETRY, otelTransport !== 'none');
-  const otelOutputToConsole = parseBoolean(merged.PIXIA_OTEL_OUTPUT_TO_CONSOLE, false);
   const otelOutputToOtel = parseBoolean(merged.PIXIA_OTEL_OUTPUT_TO_OTEL, otelTransport !== 'none');
 
   if (otelEnabled && otelTransport !== 'none' && !otelEndpoint) {
     throw new Error('Missing PIXIA_OTEL_ENDPOINT in .env when PIXIA_OTEL_TRANSPORT is grpc/http');
   }
+
+  const normalizedOtelEndpoint =
+    otelTransport === 'http' && otelEndpoint && !/^https?:\/\//i.test(otelEndpoint)
+      ? `http://${otelEndpoint}`
+      : otelEndpoint;
 
   return {
     modelOptions: {
@@ -139,12 +143,12 @@ export function loadConfigFromEnv(): DemoConfig {
       enabled: otelEnabled,
       options: {
         transport: otelTransport,
-        transportEndpoint: otelEndpoint,
+        transportEndpoint: normalizedOtelEndpoint,
         enableTelemetry: otelEnableTelemetry,
         logging: {
           serviceName: merged.PIXIA_OTEL_SERVICE_NAME ?? 'pixiagent-tui-demo',
           serviceVersion: merged.PIXIA_OTEL_SERVICE_VERSION ?? '0.1.0',
-          outputToConsole: otelOutputToConsole,
+          outputToConsole: false,
           outputToOtel: otelOutputToOtel,
         },
       },

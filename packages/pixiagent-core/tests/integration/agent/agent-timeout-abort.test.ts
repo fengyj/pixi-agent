@@ -9,7 +9,7 @@ import { PixiAgent, PixiAgentOptions } from '@pixiagent/core/agent';
 import { ModelRequestTimeoutError } from '@pixiagent/core/errors';
 import { ApiModes, SessionMessage } from '@pixiagent/core/message';
 import { Session, SessionThread } from '@pixiagent/core/session';
-import { ToolRegistry } from '@pixiagent/core/tool';
+import { ToolRegistry } from '../../../dist/tools/tool';
 
 type LiveCase = {
   name: string;

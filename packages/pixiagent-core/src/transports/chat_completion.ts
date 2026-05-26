@@ -821,7 +821,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     if (!isLikelyTimeoutError(error)) {
       return error;
     }
-    return new ModelRequestTimeoutError('openai', requestOptions?.timeout, error);
+    return new ModelRequestTimeoutError(this.client.baseURL, requestOptions?.timeout, error);
   }
 
   private getStopReason(finishReason: string): string {

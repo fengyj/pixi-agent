@@ -941,6 +941,6 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
       return error;
     }
 
-    return new ModelRequestTimeoutError('openai', requestOptions?.timeout, error);
+    return new ModelRequestTimeoutError(this.client.baseURL, requestOptions?.timeout, error);
   }
 }

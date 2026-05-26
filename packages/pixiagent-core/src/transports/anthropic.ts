@@ -678,7 +678,7 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
     if (!isLikelyTimeoutError(error)) {
       return error;
     }
-    return new ModelRequestTimeoutError('anthropic', requestOptions?.timeout, error);
+    return new ModelRequestTimeoutError(this.client.baseURL, requestOptions?.timeout, error);
   }
 
   private getStopReason(finishReason: string): string {

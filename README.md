@@ -1,6 +1,6 @@
 # pixiagent
 
-Pixi Agent is a TypeScript Bun monorepo for building an extensible agent system.
+Pixi Agent is a TypeScript monorepo for building an extensible agent system.
 
 ## Packages
 
@@ -12,25 +12,25 @@ Pixi Agent is a TypeScript Bun monorepo for building an extensible agent system.
 Install dependencies:
 
 ```bash
-bun install
+pnpm install
 ```
 
 Build all packages:
 
 ```bash
-bun workspaces run build
+pnpm -r run build
 ```
 
 Run lint across the monorepo:
 
 ```bash
-bun workspaces run lint
+pnpm -r run lint
 ```
 
 Run tests:
 
 ```bash
-bun workspaces run test:unit
+pnpm -r run test:unit
 ```
 
 ## Project structure

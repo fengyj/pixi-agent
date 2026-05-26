@@ -31,7 +31,15 @@
  */
 
 import pino from 'pino';
-import { trace, metrics, context, propagation, diag, DiagConsoleLogger, DiagLogLevel } from '@opentelemetry/api';
+import {
+  trace,
+  metrics,
+  context,
+  propagation,
+  diag,
+  DiagConsoleLogger,
+  DiagLogLevel,
+} from '@opentelemetry/api';
 import type { Logger as PinoLogger } from 'pino';
 import { withSpan, Traced, retry, Retry } from './helpers';
 export type {
@@ -66,6 +74,10 @@ export type LoggingConfig =
   | {
       serviceName?: string;
       serviceVersion?: string;
+      /**
+       * Whether to also emit log output to the console.
+       * Defaults to `false` when omitted.
+       */
       outputToConsole?: boolean;
       /**
        * Whether to also pipe logs to the OTLP collector.
@@ -137,18 +149,14 @@ let _shutdownPromise: Promise<void> | undefined;
 
 // ── internal: logger building ─────────────────────────────────────────────────
 
-function buildDefaultLoggerOptions(serviceName: string, serviceVersion: string): pino.LoggerOptions {
+function buildDefaultLoggerOptions(
+  serviceName: string,
+  serviceVersion: string,
+): pino.LoggerOptions {
   return {
     level: process.env['LOG_LEVEL'] ?? 'info',
     redact: {
-      paths: [
-        'apiKey',
-        '*.apiKey',
-        'authorization',
-        '*.authorization',
-        'password',
-        '*.password',
-      ],
+      paths: ['apiKey', '*.apiKey', 'authorization', '*.authorization', 'password', '*.password'],
       censor: '[Redacted]',
     },
     timestamp: () => `,"@timestamp":"${new Date().toISOString()}"`,
@@ -236,7 +244,9 @@ function buildDefaultTransportTargets(
 
   if (outputToOtel && transport !== 'none') {
     if (!endpoint) {
-      throw new Error(`[observation] transportEndpoint is required for OTLP log transport when transport is '${transport}'.`); // should be caught by TypeScript but added here for runtime safety
+      throw new Error(
+        `[observation] transportEndpoint is required for OTLP log transport when transport is '${transport}'.`,
+      ); // should be caught by TypeScript but added here for runtime safety
     }
     targets.push(buildOtelTransportTarget(serviceName, serviceVersion, transport, endpoint!));
   }
@@ -262,7 +272,10 @@ function addOtelTransportToLogOptions(
     return { ...logOptions, transport: { targets: [otelTarget] } };
   }
 
-  const transportObject = transportConfig as { target?: unknown; targets?: unknown } & Record<string, unknown>;
+  const transportObject = transportConfig as { target?: unknown; targets?: unknown } & Record<
+    string,
+    unknown
+  >;
   if (Array.isArray(transportObject.targets)) {
     const targets = transportObject.targets.filter(isTransportTargetOption);
     if (!targets.some((target) => target.target === 'pino-opentelemetry-transport')) {
@@ -348,7 +361,7 @@ function removeSignalHandlers(): void {
  * log.child({ requestId: 'xyz' }).warn('Retrying after rate limit');
  * log.error({ err }, 'Unhandled error');
  */
-function getLogger(name: string, bindings?: Record<string, unknown>): PinoLogger {
+export function getLogger(name: string, bindings?: Record<string, unknown>): PinoLogger {
   if (!_rootLogger) {
     _rootLogger = pino(buildDefaultLoggerOptions(DEFAULT_SERVICE_NAME, DEFAULT_SERVICE_VERSION));
   }
@@ -385,7 +398,7 @@ function getLogger(name: string, bindings?: Record<string, unknown>): PinoLogger
  *   }
  * });
  */
-function getTracer(name: string, version?: string) {
+export function getTracer(name: string, version?: string) {
   return trace.getTracer(name, version);
 }
 
@@ -417,7 +430,7 @@ function getTracer(name: string, version?: string) {
  * const latency = meter.createHistogram('gen_ai.client.operation.duration', { unit: 's' });
  * latency.record(elapsedSeconds, { 'gen_ai.operation.name': 'chat', 'gen_ai.model': model });
  */
-function getMeter(name: string, version?: string) {
+export function getMeter(name: string, version?: string) {
   return metrics.getMeter(name, version);
 }
 
@@ -475,7 +488,9 @@ function getMeter(name: string, version?: string) {
  *
  * @returns The `NodeSDK` instance when `enableTelemetry` is true, else `undefined`.
  */
-async function setupObservability(options: ObservabilityOptions): Promise<NodeSDK | undefined> {
+export async function setupObservability(
+  options: ObservabilityOptions,
+): Promise<NodeSDK | undefined> {
   if (_shutdownPromise) {
     throw new Error('[observation] setupObservability() cannot run while shutdown is in progress.');
   }
@@ -497,14 +512,17 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
       logging,
     } = options;
 
-    const outputToOtel = logging && 'rootLogger' in logging
-      ? false
-      : logging && ('outputToOtel' in logging)
-      ? logging.outputToOtel !== false
-      : transport !== 'none';
+    const outputToOtel =
+      logging && 'rootLogger' in logging
+        ? false
+        : logging && 'outputToOtel' in logging
+          ? logging.outputToOtel !== false
+          : transport !== 'none';
 
     if (transport !== 'none' && !transportEndpoint) {
-      throw new Error(`[observation] transportEndpoint is required when transport is '${transport}'.`); // should be caught by TypeScript but added here for runtime safety
+      throw new Error(
+        `[observation] transportEndpoint is required when transport is '${transport}'.`,
+      ); // should be caught by TypeScript but added here for runtime safety
     }
 
     // Resolve service identity (used for NodeSDK resource and OTel log transport).
@@ -515,9 +533,10 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
       serviceVersion = logging.serviceVersion ?? DEFAULT_SERVICE_VERSION;
     }
 
-    const outputToConsole = logging && !('rootLogger' in logging) && !('logOptions' in logging)
-      ? logging.outputToConsole !== false
-      : true;
+    const explicitOutputToConsole =
+      logging && 'outputToConsole' in logging ? logging.outputToConsole : undefined;
+
+    const outputToConsole = explicitOutputToConsole !== undefined ? explicitOutputToConsole : false;
 
     let logOptionsWithOtelTransport: pino.LoggerOptions | undefined;
 
@@ -562,7 +581,9 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
       ]);
 
       const traceExporter =
-        transport === 'grpc' ? new OTLPTraceExporterGrpc({ url }) : new OTLPTraceExporterHttp({ url });
+        transport === 'grpc'
+          ? new OTLPTraceExporterGrpc({ url })
+          : new OTLPTraceExporterHttp({ url });
 
       const metricReaders = [
         new PeriodicExportingMetricReader({
@@ -593,7 +614,7 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
     } else if (logging && 'logOptions' in logging) {
       _rootLogger = pino(logOptionsWithOtelTransport ?? logging.logOptions);
     } else {
-      const outputToConsole = logging?.outputToConsole ?? true;
+      const outputToConsole = logging?.outputToConsole ?? false;
       const defaultLogOptions = buildDefaultLoggerOptions(serviceName, serviceVersion);
       const defaultTransportTargets = buildDefaultTransportTargets(
         outputToConsole,
@@ -658,7 +679,7 @@ async function setupObservability(options: ObservabilityOptions): Promise<NodeSD
  * @returns A `Promise` that resolves once all providers have been shut down
  *   and all buffered telemetry has been flushed to the collector.
  */
-async function shutdownObservability(): Promise<void> {
+export async function shutdownObservability(): Promise<void> {
   if (_shutdownPromise) {
     return _shutdownPromise;
   }
@@ -710,7 +731,7 @@ async function shutdownObservability(): Promise<void> {
           };
 
           try {
-            ((loggerStream as { end: (cb?: () => void) => void }).end)(done);
+            (loggerStream as { end: (cb?: () => void) => void }).end(done);
           } catch {
             done();
             return;
@@ -727,10 +748,26 @@ async function shutdownObservability(): Promise<void> {
       } catch (err) {
         process.stderr.write(`[observation] SDK shutdown error: ${String(err)}\n`);
       } finally {
-        try { metrics.disable(); } catch { /* ignore */ }
-        try { trace.disable(); } catch { /* ignore */ }
-        try { propagation.disable(); } catch { /* ignore */ }
-        try { context.disable(); } catch { /* ignore */ }
+        try {
+          metrics.disable();
+        } catch {
+          /* ignore */
+        }
+        try {
+          trace.disable();
+        } catch {
+          /* ignore */
+        }
+        try {
+          propagation.disable();
+        } catch {
+          /* ignore */
+        }
+        try {
+          context.disable();
+        } catch {
+          /* ignore */
+        }
       }
     }
 
@@ -746,20 +783,13 @@ async function shutdownObservability(): Promise<void> {
   }
 }
 
-export const Observation = {
-  getLogger,
-  getTracer,
-  getMeter,
-  setupObservability,
-  shutdownObservability,
-  helpers: {
-    withSpan,
-    Traced,
-    retry,
-    Retry,
-  },
-  Targets: {
-    buildConsoleTransportTarget,
-    buildOtelTransportTarget,
-  },
+export const Helpers = {
+  withSpan,
+  Traced,
+  retry,
+  Retry,
+};
+export const Targets = {
+  buildConsoleTransportTarget,
+  buildOtelTransportTarget,
 };

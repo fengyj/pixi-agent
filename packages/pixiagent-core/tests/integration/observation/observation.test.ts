@@ -15,7 +15,7 @@
  *     pino JSON output, not on collector acknowledgement.
  *
  * Running:
- *   bun workspaces run test:integration --filter @pixiagent/core \
+ *   pnpm -r run test:integration --filter @pixiagent/core \
  *     -- --testPathPattern observation
  */
 
@@ -260,6 +260,39 @@ describe('observation — rootLogger passthrough', () => {
         resolve();
       });
     });
+  });
+
+  it('defaults outputToConsole to false when logs are also sent to OTLP', async () => {
+    await shutdownObservability();
+
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write;
+    (process.stdout as unknown as { write: any }).write = (chunk: unknown, ...args: unknown[]) => {
+      writes.push(typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+      if (typeof args[0] === 'function') {
+        (args[0] as Function)();
+      }
+      return true;
+    };
+
+    try {
+      await setupObservability({
+        transport: 'grpc',
+        transportEndpoint: 'localhost:9937',
+        logging: {
+          serviceName: 'test-service',
+          serviceVersion: '0.0.1',
+        },
+      });
+
+      const log = Observation.getLogger('test.consoleInference');
+      log.info('should not appear on stdout by default');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(writes.join('')).not.toContain('should not appear on stdout by default');
+    } finally {
+      (process.stdout as unknown as { write: any }).write = originalWrite;
+      await shutdownObservability();
+    }
   });
 });
 

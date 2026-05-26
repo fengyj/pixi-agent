@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiModes } from '../message';
-import { Transport } from './index';
+import * as Transport from './index';
 
 describe('Transport.GlobalApiModeResolverRegistry', () => {
   it('resolves OpenRouter base URL to completions mode', () => {

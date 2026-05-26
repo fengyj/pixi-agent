@@ -4,7 +4,8 @@
     "composite": true,
     "rootDir": "src",
     "outDir": "dist",
-    "types": ["node"]
+    "types": ["node"],
+    "jsx": "react-jsx"
   },
   "include": ["src"],
   "references": [

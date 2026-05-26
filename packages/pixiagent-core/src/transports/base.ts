@@ -8,7 +8,7 @@ import {
   SessionMessage,
   UsageStats,
 } from '../message';
-import { ToolDefinitionSchema } from '../tool';
+import { ToolDefinitionSchema } from '../tools/tool';
 
 /**
  * The base class for the transport of the provider.

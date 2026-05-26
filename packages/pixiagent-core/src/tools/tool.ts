@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ToolCallPart, ToolResultPart } from './message';
+import { ToolCallPart, ToolResultPart } from '../message';
 
 export type ToolCallOptions = {
   signal?: AbortSignal | undefined | null;

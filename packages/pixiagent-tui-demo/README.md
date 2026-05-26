@@ -1,6 +1,6 @@
 # @pixiagent/tui-demo
 
-A simple interactive CLI chat demo based on PixiAgent.
+A simple interactive CLI chat demo based on PixiAgent, rebuilt with Ink for native Node.js terminal rendering.
 
 ## Features
 
@@ -9,7 +9,6 @@ A simple interactive CLI chat demo based on PixiAgent.
 - Displays the final assistant message for each turn.
 - Multi-line input (`Enter` newline, `Ctrl+Enter` send).
 - Line-based message scrolling with keyboard shortcuts.
-- Mouse support is temporarily disabled for terminal compatibility.
 - Optional observability via `Observation.setupObservability`.
 - Includes a backend interface so UI/backend transport can later be swapped to ACP.
 
@@ -43,11 +42,11 @@ Optional observability variables:
 
 From repository root:
 
-- `bun run --filter @pixiagent/tui-demo start`
+- `pnpm --filter @pixiagent/tui-demo run start`
 
 Or from this package directory:
 
-- `bun run start`
+- `pnpm run start`
 
 Commands:
 
@@ -87,14 +86,11 @@ PIXIA_OTEL_OUTPUT_TO_OTEL=true
 
 ## Troubleshooting
 
-If you see escape-sequence gibberish (for example `^[[...`) inside the input area:
+If you see escape-sequence gibberish inside the TUI:
 
-- Set `PIXIA_OTEL_OUTPUT_TO_CONSOLE=false`.
-- Prefer running from package directory: `cd packages/pixiagent-tui-demo && bun run start`.
-- If needed, restart terminal session and run again.
-- OpenTUI official compatibility switches used by this demo:
-	- `OPENTUI_FORCE_EXPLICIT_WIDTH=false` (skip OSC 66 width queries)
-	- `OTUI_USE_CONSOLE=false` (disable OpenTUI console capture)
+- Prefer running from package directory: `cd packages/pixiagent-tui-demo && pnpm run start`.
+- If needed, restart the terminal session and run again.
+- Keep `PIXIA_OTEL_OUTPUT_TO_CONSOLE=false` when observability is enabled.
 
 ## Note on System Prompt
 

@@ -10,7 +10,8 @@
  */
 
 import { SessionThread } from './session';
-import { Transport, ProviderTransport, ModelOptions } from './transports';
+import * as Transport from './transports';
+import { ProviderTransport, ModelOptions } from './transports';
 import {
   ContentPart,
   InternalMessage,
@@ -20,14 +21,14 @@ import {
   ToolResultPart,
   UsageStats,
 } from './message';
-import { ToolRegistry } from './tool';
-import { Observation } from './observation';
+import { ToolRegistry } from './tools/tool';
 import type { Span } from '@opentelemetry/api';
 import { AgentInterruptedError, ApiModeResolutionError, InvalidMessageError } from './errors/types';
 import { ModelResponse } from './transports/base';
 
+import * as Observation from './observation';
 const trace = Observation.getTracer('pixiagent.agent');
-const { withSpan, retry } = Observation.helpers;
+const { withSpan, retry } = Observation.Helpers;
 
 export class PixiAgent {
   private readonly logger: ReturnType<ReturnType<typeof Observation.getLogger>['child']>;
@@ -58,7 +59,7 @@ export class PixiAgent {
    * The input is a pending message, which is added to the session thread's pending messages.
    * The agent will peek the pending messages, and execute them one by one.
    * @param modelOptions
-   * @param input todo: add InterruptionMessage
+   * @param input
    */
   public async execute(
     modelOptions: ModelOptions,
@@ -183,7 +184,6 @@ export class PixiAgent {
           response.usage,
           createdAt,
         );
-        // todo: log the response message
         this.logger.info(
           PixiAgent.getMessageLogData(modelOptions, respSessionMsg, responseInternalMsg, response),
           'Response from the LLM',
@@ -315,7 +315,7 @@ export class PixiAgent {
         this.refreshHistoryIfMediaExpired(modelOptions, transport, historyMessages);
         const response = await this.executeLLMRequest(transport, modelOptions, historyMessages);
 
-        if (response.stopReason === 'tool_call' && this.abortController.signal.aborted === false) {
+        if (response.stopReason === 'tool_call') {
           await this.executeToolCallRequest(transport, modelOptions, historyMessages);
         }
 
@@ -571,9 +571,6 @@ export class PixiAgent {
         },
       );
     } catch (error) {
-      if (this.isInterruptAbortError(error)) {
-        throw error;
-      }
       return this.toToolCallErrorResult(toolCall, error);
     }
   }
@@ -858,7 +855,7 @@ export type PixiAgentOptions = {
    * If its value is undefined, or less or equal to 0, it will not retry.
    *
    * Retry is only for retriable errors, such as network errors, or server errors (5xx).
-   * 
+   *
    * The retry times for tool call is defined in the ToolRegistry.
    */
   maxModelRequestRetries?: number;

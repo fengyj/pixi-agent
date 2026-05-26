@@ -2,15 +2,16 @@
   "name": "@pixiagent/core",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "pnpm exec tsup",
     "lint": "eslint . --ext .ts",
-    "test": "bun run test:unit",
+    "test": "pnpm run test:unit",
     "test:unit": "vitest run --config ../../vitest.config.ts",
     "test:browser-unit": "vitest run --config ../../vitest.browser-unit.config.ts",
     "test:integration": "vitest run --config ../../vitest.integration.config.ts"
@@ -19,51 +20,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./agent": {
-      "types": "./dist/agent.d.ts",
-      "default": "./dist/agent.js"
-    },
-    "./agent-manager": {
-      "types": "./dist/agent-manager.d.ts",
-      "default": "./dist/agent-manager.js"
-    },
-    "./message": {
-      "types": "./dist/message.d.ts",
-      "default": "./dist/message.js"
-    },
-    "./model": {
-      "types": "./dist/model.d.ts",
-      "default": "./dist/model.js"
-    },
-    "./session": {
-      "types": "./dist/session.d.ts",
-      "default": "./dist/session.js"
-    },
-    "./tool": {
-      "types": "./dist/tool.d.ts",
-      "default": "./dist/tool.js"
-    },
-    "./errors": {
-      "types": "./dist/errors/index.d.ts",
-      "default": "./dist/errors/index.js"
-    },
-    "./errors/*": {
-      "types": "./dist/errors/*.d.ts",
-      "default": "./dist/errors/*.js"
-    },
-    "./observation": {
-      "types": "./dist/observation/index.d.ts",
-      "browser": "./dist/observation/browser.js",
-      "default": "./dist/observation/index.js"
-    },
-    "./transports": {
-      "types": "./dist/transports/index.d.ts",
-      "default": "./dist/transports/index.js"
-    },
-    "./transports/*": {
-      "types": "./dist/transports/*.d.ts",
-      "default": "./dist/transports/*.js"
     }
   },
   "dependencies": {
@@ -158,6 +114,7 @@
     "happy-dom": "^20.9.0",
     "pino-opentelemetry-transport": "^3.0.0",
     "pino-pretty": "^13.0.0",
+    "tsup": "^8.5.1",
     "vitest": "^4.1.5"
   }
 }
