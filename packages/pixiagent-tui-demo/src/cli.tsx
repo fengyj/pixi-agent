@@ -398,6 +398,25 @@ const formatUsageTokens = (
   usage: UsageState,
 ): string => `${formatCompactToken(usage.inputTokens)} | ${formatCompactToken(usage.outputTokens)} | ${formatCompactToken(usage.cacheReadTokens)} | ${formatCompactToken(usage.totalTokens)}`;
 
+function getStartupObservabilityOptions(): Parameters<typeof setupObservability>[0] {
+  if (config.observability.enabled) {
+    return config.observability.options;
+  }
+
+  // Silence default stdout logger in TUI mode to avoid corrupting Ink redraws.
+  return {
+    transport: 'none',
+    enableTelemetry: false,
+    logging: {
+      logOptions: {
+        enabled: false,
+        level: 'silent',
+      },
+      outputToOtel: false,
+    },
+  };
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -431,12 +450,6 @@ const App = (): JSX.Element => {
   );
 
   useEffect(() => {
-    if (config.observability.enabled) {
-      void setupObservability(config.observability.options).catch(() => {
-        // ignore observability startup failures for demo
-      });
-    }
-
     return () => {
       void shutdownObservability().catch(() => {
         // ignore shutdown errors during unmount
@@ -544,19 +557,35 @@ const App = (): JSX.Element => {
   }, [addHistory, backend, handleCommand, inputText, pending]);
 
   const markdownWidth = Math.max(24, stdoutColumns - 10);
+  const placeholderText = 'Type your message... (Ctrl+S to send)';
+  const isPlaceholder = inputText.length === 0;
+  const rawInputLines = isPlaceholder ? [placeholderText] : inputText.split('\n');
+  const maxVisibleInputLines = 4;
+  const inputContentHeight = clamp(rawInputLines.length, 1, maxVisibleInputLines);
+  const visibleInputLines = rawInputLines.slice(-inputContentHeight);
+  const inputPanelHeight = inputContentHeight + 2;
+
+  // Row budget keeps the whole UI within terminal bounds while input grows.
+  // total rows = outer(2) + header(1) + messageBox(2 + msg) + usage(2) + inputBox(2 + input)
+  const fixedRows = 9;
+  const messagePanelHeight = Math.max(1, stdoutRows - fixedRows - inputContentHeight);
+
   const messageContent = useMemo(
     () => renderMessageContent(history, Math.max(24, stdoutColumns - 8), markdownWidth),
     [history, markdownWidth],
   );
 
   const messageLines = useMemo(() => messageContent.split('\n'), [messageContent]);
-  const messagePanelHeight = Math.max(4, stdoutRows - 12);
   const maxOffset = Math.max(0, messageLines.length - messagePanelHeight);
   const offset = clamp(scrollOffset, 0, maxOffset);
   const visibleLines = messageLines.slice(
     Math.max(0, messageLines.length - messagePanelHeight - offset),
     messageLines.length - offset,
   );
+  const paddedVisibleLines = [...visibleLines];
+  while (paddedVisibleLines.length < messagePanelHeight) {
+    paddedVisibleLines.push('');
+  }
   const firstVisibleLine = Math.max(1, messageLines.length - messagePanelHeight - offset + 1);
   const lastVisibleLine = Math.max(0, messageLines.length - offset);
   const scrollPositionText =
@@ -625,37 +654,40 @@ const App = (): JSX.Element => {
     }
   });
 
-  const placeholderText = 'Type your message... (Ctrl+S to send)';
-  const isPlaceholder = inputText.length === 0;
-  const rawInputLines = isPlaceholder ? [placeholderText] : inputText.split('\n');
-  const lastLineIndex = rawInputLines.length - 1;
+  const lastLineIndex = visibleInputLines.length - 1;
   const statusText = `${statusLabel} | Pos: ${scrollPositionText}`;
   const sessionUsageText = formatUsageTokens(sessionUsage);
   const requestUsageText = formatUsageTokens(lastRequestUsage);
   const cursorChar = cursorVisible ? '▉' : ' ';
 
   return (
-    <Box flexDirection="column" paddingTop={1} paddingRight={1} paddingBottom={0} paddingLeft={1} borderStyle="round" borderColor="#3a4a5a">
-      <Text color="#89b4fa">PixiAgent TUI Demo | model={config.modelOptions.model} | base={config.modelOptions.baseUrl}</Text>
+    <Box
+      flexDirection="column"
+      width={stdoutColumns}
+      height={stdoutRows}
+      borderStyle="round"
+      borderColor="#3a4a5a"
+    >
+      <Text color="#89b4fa" wrap="truncate-end">PixiAgent TUI Demo | model={config.modelOptions.model} | base={config.modelOptions.baseUrl}</Text>
 
-      <Box flexDirection="column" borderStyle="single" borderColor="#4b5563" paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0} flexGrow={1} minHeight={messagePanelHeight}>
-        {visibleLines.map((line, index) => (
+      <Box flexDirection="column" borderStyle="single" borderColor="#4b5563" paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0} height={messagePanelHeight + 2}>
+        {paddedVisibleLines.map((line, index) => (
           <Text key={`message-${index}`} wrap="wrap">
-            {line}
+            {line || ' '}
           </Text>
         ))}
       </Box>
 
-      <Box justifyContent="flex-end" marginTop={1}>
-        <Text color="#94a3b8">Total (I|O|C|T): {sessionUsageText}</Text>
+      <Box justifyContent="flex-end">
+        <Text color="#94a3b8" wrap="truncate-end">Total (I|O|C|T): {sessionUsageText}</Text>
       </Box>
       <Box justifyContent="space-between">
-        <Text color="#f9e2af">{statusText}</Text>
-        <Text color="#f9e2af">Last  (I|O|C|T): {requestUsageText}</Text>
+        <Text color="#f9e2af" wrap="truncate-end">{statusText}</Text>
+        <Text color="#f9e2af" wrap="truncate-end">Last  (I|O|C|T): {requestUsageText}</Text>
       </Box>
 
-      <Box flexDirection="column" borderStyle="single" borderColor="#4b5563" paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0} minHeight={3} marginTop={0}>
-        {rawInputLines.map((line, index) => {
+      <Box flexDirection="column" borderStyle="single" borderColor="#4b5563" paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0} height={inputPanelHeight}>
+        {visibleInputLines.map((line, index) => {
           const isLast = index === lastLineIndex;
           if (isPlaceholder) {
             return (
@@ -678,4 +710,18 @@ const App = (): JSX.Element => {
   );
 };
 
-render(<App />);
+async function bootstrap(): Promise<void> {
+  try {
+    await setupObservability(getStartupObservabilityOptions());
+  } catch {
+    // Keep demo running even if observability setup fails.
+  }
+
+  if (process.stdout.isTTY) {
+    process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+  }
+
+  render(<App />);
+}
+
+void bootstrap();
