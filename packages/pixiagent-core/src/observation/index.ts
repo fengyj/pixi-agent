@@ -48,6 +48,7 @@ export type {
   RetryOptions,
   RetryDecoratorOptions,
 } from './helpers';
+export type { Span as AgentSpan } from '@opentelemetry/api';
 
 // ── types ─────────────────────────────────────────────────────────────────────
 

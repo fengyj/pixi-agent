@@ -267,10 +267,10 @@ describe('observation — rootLogger passthrough', () => {
 
     const writes: string[] = [];
     const originalWrite = process.stdout.write;
-    (process.stdout as unknown as { write: any }).write = (chunk: unknown, ...args: unknown[]) => {
+    (process.stdout as unknown as { write: unknown }).write = (chunk: unknown, ...args: unknown[]) => {
       writes.push(typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
       if (typeof args[0] === 'function') {
-        (args[0] as Function)();
+        (args[0] as () => void)();
       }
       return true;
     };
@@ -290,7 +290,7 @@ describe('observation — rootLogger passthrough', () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
       expect(writes.join('')).not.toContain('should not appear on stdout by default');
     } finally {
-      (process.stdout as unknown as { write: any }).write = originalWrite;
+      (process.stdout as unknown as { write: unknown }).write = originalWrite;
       await shutdownObservability();
     }
   });

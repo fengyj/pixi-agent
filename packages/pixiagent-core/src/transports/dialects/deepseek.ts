@@ -233,9 +233,9 @@ export class DeepSeekAnthropicDialectResolver implements DialectResolver<
   }
 
   extractFromResponse(
-    data: 'reasoning_tokens' | 'cache_read_tokens' | 'cache_created_tokens' | string,
-    response: Message,
-  ): any {
+    _data: 'reasoning_tokens' | 'cache_read_tokens' | 'cache_created_tokens' | string,
+    _response: Message,
+  ): unknown {
     return undefined;
   }
 }

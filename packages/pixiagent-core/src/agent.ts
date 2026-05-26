@@ -22,7 +22,7 @@ import {
   UsageStats,
 } from './message';
 import { ToolRegistry } from './tools/tool';
-import type { Span } from '@opentelemetry/api';
+import type { AgentSpan } from './observation';
 import { AgentInterruptedError, ApiModeResolutionError, InvalidMessageError } from './errors/types';
 import { ModelResponse } from './transports/base';
 
@@ -483,7 +483,7 @@ export class PixiAgent {
   }
 
   private addResponseSpanAttributes(
-    span: Span,
+    span: AgentSpan,
     modelOptions: ModelOptions,
     response: ModelResponse<RawMessageType>,
     responseInternalMsg: InternalMessage,
@@ -835,7 +835,7 @@ export class PixiAgent {
   }
 }
 
-export type PixiAgentOptions = {
+export interface PixiAgentOptions {
   /**
    * The timeout for the model request. If the model request takes longer than this time,
    * it will be aborted.
@@ -859,11 +859,11 @@ export type PixiAgentOptions = {
    * The retry times for tool call is defined in the ToolRegistry.
    */
   maxModelRequestRetries?: number;
-};
+}
 
-export type PixiAgentExecutionResult = {
+export interface PixiAgentExecutionResult {
   stopReason: 'end_turn' | 'max_turn_requests' | 'max_tokens' | 'refusal' | 'cancelled';
   usage?: UsageStats;
   userMessageId?: string;
   metadata?: Record<string, unknown>;
-};
+}

@@ -7,7 +7,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "pnpm exec tsup",
-    "lint": "eslint . --ext .ts,.tsx",
+    "lint": "eslint .",
     "prestart": "pnpm run build",
     "start": "node dist/cli.js",
     "dev": "pnpm exec tsx src/cli.tsx"

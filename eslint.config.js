@@ -10,8 +10,9 @@ const compat = new FlatCompat({
 module.exports = [
   {
     ignores: [
-      "node_modules/**", 
-      "dist/**"
+      "**/node_modules/**", 
+      "**/dist/**",
+      "**/.git/**"
     ],
   },
   ...compat.config({
@@ -25,11 +26,13 @@ module.exports = [
     parserOptions: {
       ecmaVersion: 2020,
       sourceType: "module",
+      ecmaFeatures: {
+        jsx: true
+      }
     },
     env: {
       node: true,
       es2020: true,
-      jest: true,
     },
     rules: {
       "import/no-unresolved": "off",
@@ -41,4 +44,7 @@ module.exports = [
       ],
     },
   }),
+  {
+    files: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.cjs", "**/*.mjs"],
+  }
 ];

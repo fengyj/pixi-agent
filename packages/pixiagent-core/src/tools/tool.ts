@@ -1,12 +1,12 @@
 import { z } from 'zod';
 import { ToolCallPart, ToolResultPart } from '../message';
 
-export type ToolCallOptions = {
+export interface ToolCallOptions {
   signal?: AbortSignal | undefined | null;
   timeout?: number;
   maxRetries?: number;
   environment?: Record<string, unknown>; // optional environment variables to pass to the tool
-};
+}
 
 export const ToolDefinitionSchema = z.object({
   name: z.string(),
@@ -16,15 +16,15 @@ export const ToolDefinitionSchema = z.object({
 
 export type ToolDefinition = z.infer<typeof ToolDefinitionSchema>;
 
-export type Tool<
+export interface Tool<
   TInputSchema extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>,
   TOutput = unknown,
-> = {
+> {
   definition: ToolDefinition;
   schema: TInputSchema;
   handler: (input: z.infer<TInputSchema>, options?: ToolCallOptions) => Promise<TOutput>;
   funcChecker: (options?: ToolCallOptions) => boolean; // A function to check if the tool can be called, e.g. check if the API key is set or if the user has permission to use the tool. Returns true if the tool can be called, false otherwise.
-};
+}
 
 export function defineTool<
   TInputSchema extends z.ZodObject<z.ZodRawShape>,
@@ -66,12 +66,12 @@ export function defineTool<
   };
 }
 
-export type Toolset = {
+export interface Toolset {
   name: string;
   description: string;
   tools: Tool[];
   includes: string[]; // list of toolset names to include, supports nested inclusion
-};
+}
 
 export class ToolRegistry {
   private toolsets = new Map<string, Toolset>();

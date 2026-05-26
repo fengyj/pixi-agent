@@ -1,0 +1,16 @@
+Scope: 2 of 3 workspace projects
+packages/pixiagent-core lint$ eslint .
+packages/pixiagent-core lint: /home/eric/code/pixi-agent/packages/pixiagent-core/src/transports/dialects/deepseek.ts
+packages/pixiagent-core lint:   236:5  error  'data' is defined but never used. Allowed unused args must match /^_/u      @typescript-eslint/no-unused-vars
+packages/pixiagent-core lint:   237:5  error  'response' is defined but never used. Allowed unused args must match /^_/u  @typescript-eslint/no-unused-vars
+packages/pixiagent-core lint:   238:6  error  Unexpected any. Specify a different type                                    @typescript-eslint/no-explicit-any
+packages/pixiagent-core lint: /home/eric/code/pixi-agent/packages/pixiagent-core/tests/integration/observation/observation.test.ts
+packages/pixiagent-core lint:   270:44  error  Unexpected any. Specify a different type                                                                                 @typescript-eslint/no-explicit-any
+packages/pixiagent-core lint:   273:21  error  The `Function` type accepts any function-like value.
+packages/pixiagent-core lint: Prefer explicitly defining any function parameters and return type  @typescript-eslint/no-unsafe-function-type
+packages/pixiagent-core lint:   293:46  error  Unexpected any. Specify a different type                                                                                 @typescript-eslint/no-explicit-any
+packages/pixiagent-core lint: ✖ 6 problems (6 errors, 0 warnings)
+packages/pixiagent-core lint: Failed
+/home/eric/code/pixi-agent/packages/pixiagent-core:
+[ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @pixiagent/core@0.1.0 lint: `eslint .`
+Exit status 1

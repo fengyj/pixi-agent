@@ -53,20 +53,20 @@ export abstract class ProviderTransport<TRawMessage> {
   ): Promise<ModelResponse<TRawMessage>>;
 }
 
-export type ModelRequestOptions = {
+export interface ModelRequestOptions {
   signal?: AbortSignal | undefined | null;
   timeout?: number;
   maxRetries?: number;
-};
+}
 
-export type ModelResponse<TRawMessage> = {
+export interface ModelResponse<TRawMessage> {
   responseId: string;
   responseMessage: TRawMessage;
   responseModel: string;
   stopReason?: 'stop' | 'tool_call' | 'max_tokens' | 'refusal' | 'cancelled' | 'timeout' | string;
   refusal?: string;
   usage?: UsageStats;
-};
+}
 
 export const ModelOptionsSchema = z.object({
   /**
@@ -165,7 +165,7 @@ export const ModelOptionsSchema = z.object({
 
 export type ModelOptions = z.infer<typeof ModelOptionsSchema>;
 
-export type StreamCallbacks = {
+export interface StreamCallbacks {
   onTextChunk?: (delta: string, chunkFlag?: 'begin' | 'end') => Promise<void> | void;
   onText?: (text: string) => Promise<void> | void;
   onThinkingChunk?: (delta: string, chunkFlag?: 'begin' | 'end') => Promise<void> | void;
@@ -179,7 +179,7 @@ export type StreamCallbacks = {
    * @returns
    */
   onError?: (error: Error) => Promise<void> | void;
-};
+}
 
 /**
  * Infer the API mode from the model options with the following priority:

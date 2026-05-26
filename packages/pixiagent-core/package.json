@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "build": "pnpm exec tsup",
-    "lint": "eslint . --ext .ts",
+    "lint": "eslint .",
     "test": "pnpm run test:unit",
     "test:unit": "vitest run --config ../../vitest.config.ts",
     "test:browser-unit": "vitest run --config ../../vitest.browser-unit.config.ts",

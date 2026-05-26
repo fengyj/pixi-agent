@@ -21,7 +21,7 @@ export enum ApiModes {
   BEDROCK = 'bedrock', // maybe this should be a dialect
 }
 
-export type UsageStats = {
+export interface UsageStats {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -35,7 +35,7 @@ export type UsageStats = {
     [name: string]: number;
   };
   // todo: add price field
-};
+}
 
 function mergeTokenDetails(
   a?: UsageStats['inputTokenDetails'],
@@ -326,7 +326,7 @@ export type RawResponseType = ChatCompletion | Response | Message;
  * then converted to the new raw format of the new model. Because users rarely change the model during the conversation,
  * so I think it's better then saving the messages in SessionMessage format.
  */
-export type InternalMessage = {
+export interface InternalMessage {
   /**
    * uuid v6, internal usage only.
    */
@@ -392,4 +392,4 @@ export type InternalMessage = {
   usage?: UsageStats;
   createdAt: string;
   completedAt?: string;
-};
+}

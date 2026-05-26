@@ -29,7 +29,7 @@ import { nanoid } from 'nanoid';
  * and joined back to the last (n) message(s) in the original conversation.
  *
  */
-export type Session = {
+export interface Session {
   sessionId: string;
   title?: string;
   createdAt: string;
@@ -77,7 +77,7 @@ export type Session = {
    * This is used for recording the sources of the media (image, video, audio, document, etc.)
    */
   mediaInfo?: MediaInfo[];
-};
+}
 
 /**
  * This is used for recording the sources of the media (image, video, audio, document, etc.) 
@@ -85,7 +85,7 @@ export type Session = {
  * used when the URL or the file id is expired or invalid, so that the media can be re-uploaded 
  * or re-fetched.
  */
-export type MediaInfo = {
+export interface MediaInfo {
   /**
    * The value can be used to retrieve the media from the original source. It can be a URL,
    * or a file path, or something else, like a key of the record in the database.
@@ -102,7 +102,7 @@ export type MediaInfo = {
   expireAt?: number;
 }
 
-export type SessionThreadInfo = {
+export interface SessionThreadInfo {
   /**
    * Thread id, it's a constant value.
    */
@@ -137,7 +137,7 @@ export type SessionThreadInfo = {
   totalUsage: UsageStats;
   createdAt: string;
   updatedAt: string;
-};
+}
 
 /**
  * The session thread is a linear conversation flow. It is used for the conversation with the LLM.
