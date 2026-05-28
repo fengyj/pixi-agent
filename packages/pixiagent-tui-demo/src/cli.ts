@@ -1,342 +1,331 @@
-
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Box, Text, render, useApp, useInput, useStdoutDimensions } from 'ink';
+import process from 'node:process';
+import {
+  BoxRenderable,
+  createCliRenderer,
+  TextRenderable,
+  TextareaRenderable,
+} from '@opentui/core';
+import { Observation } from '@pixiagent/core/observation';
 import { loadConfigFromEnv } from './env';
-import { Observation } from '@pixiagent/core';
+import { PixiAgentBackend } from './backend';
+
 const { setupObservability, shutdownObservability } = Observation;
-import { PixiAgentBackend, type ChatResponse } from './backend';
 
 type ChatLine = {
   role: 'system' | 'user' | 'assistant';
   content: string;
 };
 
-type ParsedCommand = {
-  name: string;
-  args: string;
-};
-
-const DISPLAY_ROLE_LABELS = {
-  user: 'USER',
-  assistant: 'AGENT',
-} as const;
-
-const ROLE_LABEL_WIDTH = Math.max(
-  DISPLAY_ROLE_LABELS.user.length,
-  DISPLAY_ROLE_LABELS.assistant.length,
-);
-
-function createRoleDivider(label: string, width: number): string {
-  const dividerChar = '─';
-  const core = `[ ${label.padEnd(ROLE_LABEL_WIDTH, ' ')} ]`;
-  if (width <= core.length + 2) {
-    return `${dividerChar}${core}${dividerChar}`;
+function wrapLine(line: string, width: number): string[] {
+  if (line.length <= width) {
+    return [line];
   }
 
-  const remaining = width - core.length;
-  const left = Math.floor(remaining / 2);
-  const right = remaining - left;
-  return `${dividerChar.repeat(left)}${core}${dividerChar.repeat(right)}`;
-}
-
-function renderMessageContent(lines: ChatLine[], dividerWidth: number): string {
-  const visibleLines = lines.filter((line) => line.role !== 'system');
-
-  return visibleLines
-    .map((line) => {
-      const label =
-        line.role === 'user'
-          ? DISPLAY_ROLE_LABELS.user
-          : DISPLAY_ROLE_LABELS.assistant;
-      return `${createRoleDivider(label, dividerWidth)}\n${line.content}`;
-    })
-    .join('\n\n');
-}
-
-function parseCommand(input: string): ParsedCommand | null {
-  if (!input.startsWith('/')) return null;
-
-  const body = input.slice(1);
-  if (body.length === 0) return null;
-
-  const firstWhitespaceIndex = body.search(/\s/);
-  if (firstWhitespaceIndex === -1) {
-    return { name: body.toLowerCase(), args: '' };
+  const wrapped: string[] = [];
+  let rest = line;
+  while (rest.length > width) {
+    wrapped.push(rest.slice(0, width));
+    rest = rest.slice(width);
   }
-
-  return {
-    name: body.slice(0, firstWhitespaceIndex).toLowerCase(),
-    args: body.slice(firstWhitespaceIndex).trimStart(),
-  };
+  if (rest.length > 0) {
+    wrapped.push(rest);
+  }
+  return wrapped;
 }
 
-function createEmptyUsage() {
-  return {
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-    cacheReadTokens: 0,
-  };
-}
+function toDisplayLines(lines: ChatLine[], width: number): string[] {
+  const output: string[] = [];
 
-type UsageState = ReturnType<typeof createEmptyUsage>;
+  for (const line of lines) {
+    const prefix = line.role === 'system' ? '[system] ' : line.role === 'user' ? 'you> ' : 'assistant> ';
+    const rawLines = line.content.split('\n');
 
-const formatCompactToken = (value: number): string => {
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}m`.padStart(6);
-  }
-  if (value >= 100_000) {
-    return `${Math.round(value / 1_000)}k`.padStart(6);
-  }
-  if (value >= 10_000) {
-    return `${(value / 1_000).toFixed(1).replace(/\.0$/, '')}k`.padStart(6);
-  }
-  return value.toLocaleString('en-US').padStart(6);
-};
-
-const formatUsageSummary = (
-  label: string,
-  usage: UsageState,
-): string => `${label} ${formatCompactToken(usage.inputTokens)} | ${formatCompactToken(usage.outputTokens)} | ${formatCompactToken(usage.cacheReadTokens)} | ${formatCompactToken(usage.totalTokens)}`;
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-const config = loadConfigFromEnv();
-
-const App = (): JSX.Element => {
-  const [history, setHistory] = useState<ChatLine[]>([]);
-  const [inputText, setInputText] = useState('');
-  const [pending, setPending] = useState(false);
-  const [statusLabel, setStatusLabel] = useState('Ready');
-  const [lastRequestUsage, setLastRequestUsage] = useState<UsageState>(createEmptyUsage());
-  const [sessionUsage, setSessionUsage] = useState<UsageState>(createEmptyUsage());
-  const [scrollOffset, setScrollOffset] = useState(0);
-  const [shuttingDown, setShuttingDown] = useState(false);
-
-  const { exit } = useApp();
-  const { stdoutColumns = 120, stdoutRows = 40 } = useStdoutDimensions();
-
-  const backend = useMemo(
-    () =>
-      new PixiAgentBackend(config.modelOptions, {
-        modelRequestTimeout: config.modelRequestTimeout,
-        maxIterations: config.maxIterations,
-        maxModelRequestRetries: config.maxModelRequestRetries,
-      }),
-    [],
-  );
-
-  useEffect(() => {
-    if (config.observability.enabled) {
-      void setupObservability(config.observability.options).catch(() => {
-        // ignore observability startup failures for demo
-      });
+    for (let i = 0; i < rawLines.length; i += 1) {
+      const withPrefix = i === 0 ? `${prefix}${rawLines[i]}` : `${' '.repeat(prefix.length)}${rawLines[i]}`;
+      output.push(...wrapLine(withPrefix, width));
     }
 
-    return () => {
-      void shutdownObservability().catch(() => {
-        // ignore shutdown errors during unmount
-      });
+    output.push('');
+  }
+
+  if (output.length > 0 && output[output.length - 1] === '') {
+    output.pop();
+  }
+
+  return output;
+}
+
+async function main(): Promise<void> {
+  const config = loadConfigFromEnv();
+  if (config.observability.enabled) {
+    const observabilityOptions = {
+      ...config.observability.options,
     };
-  }, []);
 
-  const addHistory = useCallback((line: ChatLine) => {
-    setHistory((prev) => [...prev, line]);
-    setScrollOffset(0);
-  }, []);
+    // TUI owns stdout; writing structured logs to console will corrupt the screen.
+    const logging = observabilityOptions.logging;
+    if (logging && !('rootLogger' in logging) && !('logOptions' in logging)) {
+      observabilityOptions.logging = {
+        ...logging,
+        outputToConsole: false,
+      };
+    }
 
-  const exitGracefully = useCallback(async () => {
-    if (shuttingDown) return;
-    setShuttingDown(true);
+    await setupObservability(observabilityOptions);
+  }
+
+  const backend = new PixiAgentBackend(config.modelOptions, {
+    modelRequestTimeout: config.modelRequestTimeout,
+    maxIterations: config.maxIterations,
+    maxModelRequestRetries: config.maxModelRequestRetries,
+  });
+
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: false,
+    useMouse: false,
+  });
+  let exiting = false;
+
+  const exitGracefully = async (exitCode = 0): Promise<void> => {
+    if (exiting) return;
+    exiting = true;
+    try {
+      renderer.destroy();
+    } catch {
+      // ignore renderer destroy errors during exit
+    }
     try {
       await shutdownObservability();
-    } catch {
-      // ignore shutdown errors
-    }
-    exit();
-  }, [exit, shuttingDown]);
-
-  const handleCommand = useCallback(
-    async (text: string): Promise<boolean> => {
-      const parsed = parseCommand(text);
-      if (!parsed) {
-        return false;
-      }
-
-      const commands: Record<string, (args: string) => Promise<void>> = {
-        exit: async () => {
-          await exitGracefully();
-        },
-        cancel: async (args: string) => {
-          if (!pending) {
-            addHistory({ role: 'assistant', content: '[cancel] No active request to interrupt.' });
-            setStatusLabel('Ready');
-            return;
-          }
-          backend.interrupt(args.length > 0 ? args : undefined);
-          setStatusLabel('Cancelling...');
-        },
-      };
-
-      const handler = commands[parsed.name];
-      if (!handler) {
-        addHistory({ role: 'assistant', content: `[command] Unknown command: /${parsed.name}` });
-        setStatusLabel('Ready');
-        return true;
-      }
-
-      await handler(parsed.args);
-      return true;
-    },
-    [addHistory, backend, exitGracefully, pending],
-  );
-
-  const submitInput = useCallback(async () => {
-    const trimmed = inputText.trim();
-    if (!trimmed) return;
-
-    setInputText('');
-
-    if (await handleCommand(trimmed)) {
-      return;
-    }
-
-    if (pending) return;
-
-    setPending(true);
-    addHistory({ role: 'user', content: trimmed });
-    setStatusLabel('assistant is thinking...');
-
-    try {
-      const response: ChatResponse = await backend.sendUserMessage(trimmed);
-      setLastRequestUsage({
-        inputTokens: response.usage.inputTokens,
-        outputTokens: response.usage.outputTokens,
-        totalTokens: response.usage.totalTokens,
-        cacheReadTokens: response.usage.cacheReadTokens ?? 0,
-      });
-      setSessionUsage({
-        inputTokens: response.sessionUsage.inputTokens,
-        outputTokens: response.sessionUsage.outputTokens,
-        totalTokens: response.sessionUsage.totalTokens,
-        cacheReadTokens: response.sessionUsage.cacheReadTokens ?? 0,
-      });
-      addHistory({ role: 'assistant', content: response.text });
-      setStatusLabel('Ready');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      addHistory({ role: 'assistant', content: `[error] ${message}` });
-      setStatusLabel('Request failed');
+      process.stderr.write(`[observability shutdown error] ${message}\n`);
     } finally {
-      setPending(false);
+      process.exit(exitCode);
     }
-  }, [addHistory, backend, handleCommand, inputText, pending]);
+  };
 
-  const messageContent = useMemo(
-    () => renderMessageContent(history, Math.max(24, stdoutColumns - 8)),
-    [history, stdoutColumns],
-  );
+  const layout = new BoxRenderable(renderer, {
+    id: 'layout',
+    flexDirection: 'column',
+    width: '100%',
+    height: '100%',
+    padding: 1,
+    border: true,
+    borderStyle: 'rounded',
+    borderColor: '#3a4a5a',
+  });
 
-  const messageLines = useMemo(() => messageContent.split('\n'), [messageContent]);
-  const messagePanelHeight = Math.max(4, stdoutRows - 12);
-  const maxOffset = Math.max(0, messageLines.length - messagePanelHeight);
-  const offset = clamp(scrollOffset, 0, maxOffset);
-  const visibleLines = messageLines.slice(
-    Math.max(0, messageLines.length - messagePanelHeight - offset),
-    messageLines.length - offset,
-  );
+  const header = new TextRenderable(renderer, {
+    id: 'header',
+    content: `PixiAgent TUI Demo | model=${config.modelOptions.model} | base=${config.modelOptions.baseUrl}`,
+    fg: '#89b4fa',
+  });
 
-  useInput((input, key) => {
-    if (key.ctrl && input === 'c') {
-      void exitGracefully();
+  const messagePanel = new BoxRenderable(renderer, {
+    id: 'message-panel',
+    flexGrow: 1,
+    flexShrink: 1,
+    width: '100%',
+    border: true,
+    borderStyle: 'single',
+    borderColor: '#4b5563',
+    padding: 1,
+    marginTop: 1,
+    marginBottom: 1,
+  });
+
+  const messageText = new TextRenderable(renderer, {
+    id: 'message-text',
+    content: '',
+    fg: '#e5e7eb',
+  });
+
+  const status = new TextRenderable(renderer, {
+    id: 'status',
+    content: `Ready. API key from ${config.apiKeyVarName}. Ctrl+Enter or Ctrl+S to send, Enter for newline, /exit to quit.`,
+    fg: '#f9e2af',
+  });
+
+  const input = new TextareaRenderable(renderer, {
+    id: 'chat-input',
+    width: '100%',
+    height: 4,
+    placeholder: 'Type your message... (Ctrl+Enter or Ctrl+S to send)',
+    backgroundColor: '#111827',
+    focusedBackgroundColor: '#1f2937',
+    textColor: '#f9fafb',
+    cursorColor: '#93c5fd',
+    wrapMode: 'word',
+    keyBindings: [
+      { name: 'return', ctrl: true, action: 'submit' },
+      { name: 'enter', ctrl: true, action: 'submit' },
+      { name: 'return', meta: true, action: 'submit' },
+      { name: 'enter', meta: true, action: 'submit' },
+      { name: 's', ctrl: true, action: 'submit' },
+    ],
+  });
+
+  messagePanel.add(messageText);
+  layout.add(header);
+  layout.add(messagePanel);
+  layout.add(status);
+  layout.add(input);
+  renderer.root.add(layout);
+
+  const history: ChatLine[] = [
+    {
+      role: 'system',
+      content: 'Welcome.',
+    },
+  ];
+  let termWidth = process.stdout.columns ?? 120;
+  let termHeight = process.stdout.rows ?? 40;
+  let scrollLineOffset = 0;
+  let pending = false;
+  let statusLabel = 'Ready';
+
+  const contentWidth = (): number => Math.max(24, termWidth - 8);
+
+  const viewportLineCount = (): number => Math.max(6, termHeight - 12);
+
+  const allDisplayLines = (): string[] => toDisplayLines(history, contentWidth());
+
+  const maxScrollOffset = (): number => Math.max(0, allDisplayLines().length - viewportLineCount());
+
+  const clampScrollOffset = (): void => {
+    const maxOffset = maxScrollOffset();
+    if (scrollLineOffset < 0) scrollLineOffset = 0;
+    if (scrollLineOffset > maxOffset) scrollLineOffset = maxOffset;
+  };
+
+  const pushHistory = (line: ChatLine): void => {
+    const before = allDisplayLines().length;
+    history.push(line);
+    const after = allDisplayLines().length;
+    if (scrollLineOffset > 0) {
+      // Keep the same viewport anchored when user is browsing older messages.
+      scrollLineOffset += after - before;
+    }
+    clampScrollOffset();
+  };
+
+  const setStatus = (next: string): void => {
+    statusLabel = next;
+    const maxOffset = maxScrollOffset();
+    const scrollInfo =
+      scrollLineOffset > 0
+        ? ` | scroll(lines): +${scrollLineOffset}/${maxOffset}`
+        : ' | scroll(lines): bottom';
+    status.content = `${statusLabel}${scrollInfo}`;
+  };
+
+  const renderHistory = (): void => {
+    clampScrollOffset();
+    const allLines = allDisplayLines();
+    const endExclusive = Math.max(0, allLines.length - scrollLineOffset);
+    const start = Math.max(0, endExclusive - viewportLineCount());
+    const visibleLines = allLines.slice(start, endExclusive);
+    messageText.content = visibleLines.join('\n');
+    setStatus(statusLabel);
+  };
+
+  renderHistory();
+  input.focus();
+
+  renderer.keyInput.on('keypress', (key) => {
+    let changed = false;
+
+    if (key.ctrl && key.name === 'c') {
+      void exitGracefully(0);
       return;
     }
 
-    if ((key.ctrl || key.meta) && (key.return || key.enter)) {
-      void submitInput();
+    if (
+      (key.ctrl && (key.name === 'return' || key.name === 'enter')) ||
+      (key.meta && (key.name === 'return' || key.name === 'enter')) ||
+      (key.ctrl && key.name === 's')
+    ) {
+      try {
+        input.submit();
+      } catch {
+        // ignore if submit is unavailable
+      }
       return;
     }
 
-    if (key.ctrl && input === 's') {
-      void submitInput();
-      return;
+    if (key.name === 'pageup' || (key.ctrl && key.name === 'up')) {
+      scrollLineOffset += Math.max(3, Math.floor(viewportLineCount() / 2));
+      changed = true;
+    } else if (key.name === 'pagedown' || (key.ctrl && key.name === 'down')) {
+      scrollLineOffset -= Math.max(3, Math.floor(viewportLineCount() / 2));
+      changed = true;
+    } else if (key.ctrl && key.name === 'u') {
+      scrollLineOffset += 1;
+      changed = true;
+    } else if (key.ctrl && key.name === 'd') {
+      scrollLineOffset -= 1;
+      changed = true;
+    } else if (key.ctrl && key.name === 'home') {
+      scrollLineOffset = maxScrollOffset();
+      changed = true;
+    } else if (key.ctrl && key.name === 'end') {
+      scrollLineOffset = 0;
+      changed = true;
     }
 
-    if (key.return || key.enter) {
-      setInputText((prev) => `${prev}\n`);
-      return;
-    }
-
-    if (key.backspace) {
-      setInputText((prev) => prev.slice(0, -1));
-      return;
-    }
-
-    if (key.pageup || (key.ctrl && key.up)) {
-      setScrollOffset((current) => clamp(current + Math.max(3, Math.floor(messagePanelHeight / 2)), 0, maxOffset));
-      return;
-    }
-
-    if (key.pagedown || (key.ctrl && key.down)) {
-      setScrollOffset((current) => clamp(current - Math.max(3, Math.floor(messagePanelHeight / 2)), 0, maxOffset));
-      return;
-    }
-
-    if (key.ctrl && key.u) {
-      setScrollOffset((current) => clamp(current + 1, 0, maxOffset));
-      return;
-    }
-
-    if (key.ctrl && key.d) {
-      setScrollOffset((current) => clamp(current - 1, 0, maxOffset));
-      return;
-    }
-
-    if (key.ctrl && key.home) {
-      setScrollOffset(maxOffset);
-      return;
-    }
-
-    if (key.ctrl && key.end) {
-      setScrollOffset(0);
-      return;
-    }
-
-    if (!key.ctrl && !key.meta && input) {
-      setInputText((prev) => prev + input);
+    if (changed) {
+      renderHistory();
     }
   });
 
-  const inputLines = inputText.length > 0 ? inputText.split('\n') : [''];
-  const statusText = `${statusLabel}${offset === 0 ? ' | scroll: bottom' : ` | scroll: older (${offset})`}`;
-  const usageText = formatUsageSummary('Total (I|O|C|T):', sessionUsage);
+  renderer.on('resize', (width, height) => {
+    termWidth = width;
+    termHeight = height;
+    renderHistory();
+  });
 
-  return (
-    <Box flexDirection="column" padding={1} borderStyle="round" borderColor="#3a4a5a">
-      <Text color="#89b4fa">PixiAgent TUI Demo | model={config.modelOptions.model} | base={config.modelOptions.baseUrl}</Text>
+  input.onSubmit = async () => {
+    const rawValue = input.plainText;
+    const value = rawValue.trim();
+    if (!value || pending) {
+      return;
+    }
 
-      <Box flexDirection="column" borderStyle="single" borderColor="#4b5563" padding={1} flexGrow={1} minHeight={messagePanelHeight}>
-        {visibleLines.map((line, index) => (
-          <Text key={index}>{line}</Text>
-        ))}
-      </Box>
+    if (value === '/exit') {
+      await exitGracefully(0);
+      return;
+    }
 
-      <Text color="#94a3b8">{usageText}</Text>
-      <Text color="#f9e2af">{statusText}</Text>
+    pending = true;
+    input.selectAll();
+    input.deleteSelection();
+    pushHistory({ role: 'user', content: value });
+    setStatus('assistant is thinking...');
+    renderHistory();
 
-      <Box flexDirection="column" borderStyle="single" borderColor="#4b5563" padding={1} minHeight={4} marginTop={1}>
-        {inputLines.map((line, index) => (
-          <Text key={index}>{line || ' '}</Text>
-        ))}
-      </Box>
+    try {
+      const answer = await backend.sendUserMessage(value);
+      pushHistory({ role: 'assistant', content: answer });
+      setStatus('Ready');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushHistory({ role: 'assistant', content: `[error] ${message}` });
+      setStatus('Request failed');
+    } finally {
+      pending = false;
+      renderHistory();
+      input.focus();
+    }
+  };
+}
 
-      <Text color="#94a3b8" wrap="truncate-end">
-        Controls: Ctrl+Enter or Ctrl+S to send · Enter for newline · /exit to quit · /cancel to interrupt
-      </Text>
-    </Box>
-  );
-};
-
-render(<App />);
+main().catch(async (error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`Fatal error: ${message}\n`);
+  try {
+    await shutdownObservability();
+  } catch {
+    // ignore shutdown errors in fatal path
+  }
+  process.exitCode = 1;
+});

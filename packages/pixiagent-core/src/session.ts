@@ -1,9 +1,4 @@
-
-import {
-  InternalMessage,
-  RawMessageType,
-  UsageStats,
-} from './message';
+import { InternalMessage, RawMessageType, RoleType, SessionMessage, UsageStats } from './message';
 import { ModelOptions } from './transports';
 import { nanoid } from 'nanoid';
 
@@ -63,7 +58,7 @@ export interface Session {
    * so that the UI can automatically switch to the new thread for the next-turn conversation.
    */
   defaultThread: string;
-  /** 
+  /**
    * Session level total usage
    */
   totalUsage: UsageStats;
@@ -73,33 +68,6 @@ export interface Session {
    * we may save the last message has been saved, so just nedd save the new messages next time.
    */
   metadata?: Record<string, string>;
-  /**
-   * This is used for recording the sources of the media (image, video, audio, document, etc.)
-   */
-  mediaInfo?: MediaInfo[];
-}
-
-/**
- * This is used for recording the sources of the media (image, video, audio, document, etc.) 
- * information in the messages when they were attached as files or URLs. This data can be
- * used when the URL or the file id is expired or invalid, so that the media can be re-uploaded 
- * or re-fetched.
- */
-export interface MediaInfo {
-  /**
-   * The value can be used to retrieve the media from the original source. It can be a URL,
-   * or a file path, or something else, like a key of the record in the database.
-   */
-  originalKey: string;
-  /**
-   * The value used by the message. Can be a URL or file id.
-   */
-  key: string;
-  /**
-   * If the key has a expiration time, it can be used to determine if need to create a new 
-   * key or not.
-   */
-  expireAt?: number;
 }
 
 export interface SessionThreadInfo {
@@ -152,12 +120,31 @@ export class SessionThread {
   ) {}
 
   addMessage(
-    role: 'assistant' | 'user' | 'tool',
-    rawMessage: RawMessageType,
+    role: RoleType,
+    rawMessage:
+      | Omit<RawMessageType, 'messageId'>
+      | (Omit<SessionMessage, 'messageId'> & { messageId?: string }),
     modelOptions: ModelOptions,
     usage?: UsageStats,
     createdAt?: string,
   ): InternalMessage {
+    if (
+      role === 'assistant' &&
+      (rawMessage as Omit<SessionMessage, 'messageId'>)?.type === 'session_message'
+    ) {
+      throw new Error('Assistant message cannot be a SessionMessage');
+    } else if (
+      role !== 'assistant' &&
+      (rawMessage as Omit<SessionMessage, 'messageId'>)?.type !== 'session_message'
+    ) {
+      throw new Error('User or tool message must be a SessionMessage');
+    }
+    const newMessageId = getSeqId(this.threadInfo.threadId, this.threadMessages.length + 1);
+    const rawMsg = {
+      ...rawMessage,
+      messageId: 'messageId' in rawMessage ? rawMessage.messageId || newMessageId : newMessageId,
+    } as RawMessageType | SessionMessage;
+
     const lastMessageId =
       this.threadMessages.length > 0
         ? this.threadMessages[this.threadMessages.length - 1].internalMessageId
@@ -165,11 +152,11 @@ export class SessionThread {
     const now = new Date().toISOString();
     createdAt = createdAt || now;
     const newMessage: InternalMessage = {
-      internalMessageId: getSeqId(this.threadInfo.threadId, this.threadMessages.length + 1),
+      internalMessageId: newMessageId,
       model: modelOptions.model,
       apiMode: modelOptions.apiMode!,
       baseUrl: modelOptions.baseUrl,
-      rawMessage: rawMessage,
+      rawMessage: rawMsg,
       role: role,
       previousMessageId: lastMessageId,
       createdAt: createdAt,
@@ -267,9 +254,11 @@ function getSeqId(id: string, num: number, digits = 2): string {
  * @param message the first message of the session
  * @returns
  */
-function createSession(
-  options: { modelOptions: ModelOptions; holder?: string; parentSessionId?: string },
-): Session {
+function createSession(options: {
+  modelOptions: ModelOptions;
+  holder?: string;
+  parentSessionId?: string;
+}): Session {
   const sessionId = createSessionId();
   const now = new Date().toISOString();
   const session: Session = {

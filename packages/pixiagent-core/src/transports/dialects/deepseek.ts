@@ -5,7 +5,7 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionStreamParams,
 } from 'openai/resources/chat/completions';
-import { ApiModes, SessionMessage, ThinkingPart, ContentPart } from '../../message';
+import { ApiModes, AnthropicApiMessage, ChatCompletionApiMessage, SessionMessage, ThinkingPart, ContentPart } from '../../message';
 import { ApiModeResolver, DialectResolver, ModelOptions } from '../base';
 import type {
   Message,
@@ -35,7 +35,7 @@ export class DeepSeekApiModeResolver extends ApiModeResolver {
  * Handles the provider-specific `reasoning_content` field for thinking/reasoning.
  */
 export class DeepSeekChatDialectResolver implements DialectResolver<
-  ChatCompletionMessageParam,
+  ChatCompletionApiMessage,
   ChatCompletionChunk.Choice.Delta,
   ChatCompletionStreamParams,
   ChatCompletion
@@ -81,23 +81,25 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
   }
 
   manipulateRawMessage(
-    rawMsg: ChatCompletionMessageParam,
+    rawMsg: ChatCompletionApiMessage,
     msg?: SessionMessage,
-  ): ChatCompletionMessageParam {
+  ): ChatCompletionApiMessage {
     if (!msg || rawMsg.role !== 'assistant' || !(msg.content instanceof Array)) return rawMsg;
     const thinkingParts = msg.content.filter((p): p is ThinkingPart => p.type === 'thinking');
     if (thinkingParts.length === 0) return rawMsg;
     // Write the accumulated thinking content back as reasoning_content
-    (
-      rawMsg as ChatCompletionAssistantMessageParam & { reasoning_content?: string }
-    ).reasoning_content = thinkingParts.map((p) => p.content).join('');
-    return rawMsg;
+    const updatedInner = {
+      ...rawMsg.content,
+      reasoning_content: thinkingParts.map((p) => p.content).join(''),
+    } as ChatCompletionAssistantMessageParam & { reasoning_content?: string };
+    return { ...rawMsg, content: updatedInner };
   }
 
-  manipulateMessage(msg: SessionMessage, rawMsg: ChatCompletionMessageParam): SessionMessage {
-    if (rawMsg.role !== 'assistant') return msg;
+  manipulateMessage(msg: SessionMessage, rawMsg: ChatCompletionApiMessage): SessionMessage {
+    const inner = rawMsg.content;
+    if (inner.role !== 'assistant') return msg;
     const reasoningContent: string | undefined = (
-      rawMsg as ChatCompletionAssistantMessageParam & { reasoning_content?: string }
+      inner as ChatCompletionAssistantMessageParam & { reasoning_content?: string }
     ).reasoning_content;
     if (!reasoningContent) return msg;
     const thinkingPart: ThinkingPart = { type: 'thinking', content: reasoningContent };
@@ -131,7 +133,7 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
  * Handles thinking blocks in content using the Anthropic thinking block format.
  */
 export class DeepSeekAnthropicDialectResolver implements DialectResolver<
-  MessageParam,
+  AnthropicApiMessage,
   RawContentBlockDelta,
   MessageStreamParams,
   Message
@@ -179,19 +181,20 @@ export class DeepSeekAnthropicDialectResolver implements DialectResolver<
     'container_upload',
   ]);
 
-  manipulateRawMessage(rawMsg: MessageParam, msg?: SessionMessage): MessageParam {
+  manipulateRawMessage(rawMsg: AnthropicApiMessage, msg?: SessionMessage): AnthropicApiMessage {
+    const innerContent = rawMsg.content;
     // Step 1: filter out content block types that DeepSeek doesn't support (image, document, etc.).
     // Step 2: for assistant messages, inject unsigned thinking blocks (DeepSeek doesn't use signatures).
     //
-    // We only clone rawMsg when we actually need to mutate it.
-    // When msg is undefined, rawMsg wasn't produced from a SessionMessage conversion, so we must
+    // We only clone innerContent when we actually need to mutate it.
+    // When msg is undefined, innerContent wasn't produced from a SessionMessage conversion, so we must
     // clone before mutating to avoid side-effects on the original object.
 
     const rawContent =
-      typeof rawMsg.content === 'string'
-        ? [{ type: 'text' as const, text: rawMsg.content }]
+      typeof innerContent.content === 'string'
+        ? [{ type: 'text' as const, text: innerContent.content }]
         : // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (rawMsg.content as any[]);
+          (innerContent.content as any[]);
 
     // Collect unsupported block indices to know whether filtering is needed.
     const filteredContent = rawContent.filter(
@@ -202,7 +205,7 @@ export class DeepSeekAnthropicDialectResolver implements DialectResolver<
 
     // Collect unsigned thinking parts to inject (assistant only).
     const unsignedThinkingParts =
-      rawMsg.role === 'assistant' && msg?.content instanceof Array
+      innerContent.role === 'assistant' && msg?.content instanceof Array
         ? msg.content.filter((p): p is ThinkingPart => p.type === 'thinking' && !p.signature)
         : [];
     const needsThinking = unsignedThinkingParts.length > 0;
@@ -210,7 +213,7 @@ export class DeepSeekAnthropicDialectResolver implements DialectResolver<
     if (!needsFilter && !needsThinking) return rawMsg;
 
     // Clone only when we know a mutation is needed and msg is absent (shared reference risk).
-    const base: MessageParam = msg ? rawMsg : structuredClone(rawMsg);
+    const base: MessageParam = msg ? innerContent : structuredClone(innerContent);
 
     const thinkingBlocks: ThinkingBlockParam[] = unsignedThinkingParts.map((p) => ({
       type: 'thinking' as const,
@@ -218,10 +221,11 @@ export class DeepSeekAnthropicDialectResolver implements DialectResolver<
       signature: '',
     }));
 
-    return { ...base, content: [...thinkingBlocks, ...filteredContent] };
+    const updatedInner: MessageParam = { ...base, content: [...thinkingBlocks, ...filteredContent] };
+    return { ...rawMsg, content: updatedInner };
   }
 
-  manipulateMessage(msg: SessionMessage, _rawMsg: MessageParam): SessionMessage {
+  manipulateMessage(msg: SessionMessage, _rawMsg: AnthropicApiMessage): SessionMessage {
     // Thinking blocks are already handled by AnthropicTransport.convertFromRawMessage.
     return msg;
   }

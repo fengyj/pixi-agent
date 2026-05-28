@@ -1,22 +1,19 @@
 import type {
   ChatCompletion,
   ChatCompletionChunk,
-  ChatCompletionMessageParam,
   ChatCompletionStreamParams,
 } from 'openai/resources/chat/completions';
 import type {
   Response,
   ResponseCreateParams,
-  ResponseInputItem,
   ResponseStreamEvent,
 } from 'openai/resources/responses/responses';
 import type {
   Message,
-  MessageParam,
   MessageStreamParams,
   RawContentBlockDelta,
 } from '@anthropic-ai/sdk/resources/messages/messages';
-import { ApiModes, SessionMessage } from '../../message';
+import { ApiModes, AnthropicApiMessage, ChatCompletionApiMessage, ResponseApiMessage, SessionMessage } from '../../message';
 import { ApiModeResolver, DialectResolver, ModelOptions } from '../base';
 
 const OFOX_OPENAI_BASES = ['https://api.ofox.ai/v1', 'https://api.ofox.io/v1'];
@@ -69,7 +66,7 @@ export class OfoxApiModeResolver extends ApiModeResolver {
 }
 
 export class OfoxChatDialectResolver implements DialectResolver<
-  ChatCompletionMessageParam,
+  ChatCompletionApiMessage,
   ChatCompletionChunk.Choice.Delta,
   ChatCompletionStreamParams,
   ChatCompletion
@@ -87,13 +84,13 @@ export class OfoxChatDialectResolver implements DialectResolver<
   }
 
   manipulateRawMessage(
-    rawMsg: ChatCompletionMessageParam,
+    rawMsg: ChatCompletionApiMessage,
     _msg?: SessionMessage,
-  ): ChatCompletionMessageParam {
+  ): ChatCompletionApiMessage {
     return rawMsg;
   }
 
-  manipulateMessage(msg: SessionMessage, _rawMsg: ChatCompletionMessageParam): SessionMessage {
+  manipulateMessage(msg: SessionMessage, _rawMsg: ChatCompletionApiMessage): SessionMessage {
     return msg;
   }
 
@@ -109,7 +106,7 @@ export class OfoxChatDialectResolver implements DialectResolver<
 }
 
 export class OfoxResponseDialectResolver implements DialectResolver<
-  ResponseInputItem,
+  ResponseApiMessage,
   ResponseStreamEvent,
   ResponseCreateParams,
   Response
@@ -141,11 +138,11 @@ export class OfoxResponseDialectResolver implements DialectResolver<
     };
   }
 
-  manipulateRawMessage(rawMsg: ResponseInputItem, _msg?: SessionMessage): ResponseInputItem {
+  manipulateRawMessage(rawMsg: ResponseApiMessage, _msg?: SessionMessage): ResponseApiMessage {
     return rawMsg;
   }
 
-  manipulateMessage(msg: SessionMessage, _rawMsg: ResponseInputItem): SessionMessage {
+  manipulateMessage(msg: SessionMessage, _rawMsg: ResponseApiMessage): SessionMessage {
     return msg;
   }
 
@@ -161,7 +158,7 @@ export class OfoxResponseDialectResolver implements DialectResolver<
 }
 
 export class OfoxAnthropicDialectResolver implements DialectResolver<
-  MessageParam,
+  AnthropicApiMessage,
   RawContentBlockDelta,
   MessageStreamParams,
   Message
@@ -175,11 +172,11 @@ export class OfoxAnthropicDialectResolver implements DialectResolver<
     return parameters;
   }
 
-  manipulateRawMessage(rawMsg: MessageParam, _msg?: SessionMessage): MessageParam {
+  manipulateRawMessage(rawMsg: AnthropicApiMessage, _msg?: SessionMessage): AnthropicApiMessage {
     return rawMsg;
   }
 
-  manipulateMessage(msg: SessionMessage, _rawMsg: MessageParam): SessionMessage {
+  manipulateMessage(msg: SessionMessage, _rawMsg: AnthropicApiMessage): SessionMessage {
     return msg;
   }
 

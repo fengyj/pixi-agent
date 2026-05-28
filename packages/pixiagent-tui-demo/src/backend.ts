@@ -1,5 +1,7 @@
 import type { 
+  ContentPart,
   InternalMessage, 
+  RawMessageType,
   SessionMessage, 
 } from '@pixiagent/core';
 import { 
@@ -24,50 +26,73 @@ export type ChatBackend = {
   interrupt(reason?: string): void;
 };
 
-function extractAssistantText(rawMessage: unknown): string {
+function extractTextFromSessionMessage(message: SessionMessage): string {
   const textChunks: string[] = [];
 
-  const visit = (value: unknown): void => {
-    if (!value) return;
-    if (typeof value === 'string') {
-      if (value.trim().length > 0) {
-        textChunks.push(value);
+  const visitContent = (content: string | Array<ContentPart> | undefined): void => {
+    if (!content) return;
+    if (typeof content === 'string') {
+      const trimmed = content.trim();
+      if (trimmed.length > 0) {
+        textChunks.push(trimmed);
       }
       return;
     }
 
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item);
-      return;
-    }
-
-    if (typeof value === 'object') {
-      const record = value as Record<string, unknown>;
-
-      // Common text payloads across OpenAI/Anthropic-compatible responses.
-      if (typeof record.text === 'string') {
-        textChunks.push(record.text);
-      }
-      if (typeof record.content === 'string') {
-        textChunks.push(record.content);
-      }
-
-      if (record.content && typeof record.content !== 'string') {
-        visit(record.content);
-      }
-      if (record.output) {
-        visit(record.output);
-      }
-      if (record.message) {
-        visit(record.message);
+    for (const part of content) {
+      switch (part.type) {
+        case 'text':
+          if (part.text.trim().length > 0) {
+            textChunks.push(part.text);
+          }
+          break;
+        case 'thinking':
+          if (part.content.trim().length > 0) {
+            textChunks.push(part.content);
+          }
+          break;
+        case 'refusal':
+          if (part.reason.trim().length > 0) {
+            textChunks.push(part.reason);
+          }
+          break;
+        case 'tool_result':
+          if (typeof part.result === 'string' && part.result.trim().length > 0) {
+            textChunks.push(part.result);
+          }
+          break;
+        default:
+          break;
       }
     }
   };
 
-  visit(rawMessage);
+  visitContent(message.content);
 
-  const merged = textChunks.join('').trim();
+  const merged = textChunks.join(' ').trim();
   return merged.length > 0 ? merged : '(assistant returned no text content)';
+}
+
+function getSessionMessageFromRaw(
+  rawMessage: RawMessageType | SessionMessage,
+  apiMode: InternalMessage['apiMode'],
+  baseUrl?: string,
+): SessionMessage {
+  if ((rawMessage as SessionMessage)?.type === 'session_message') {
+    return rawMessage as SessionMessage;
+  }
+
+  const transport = Transports.getTransport(apiMode, baseUrl);
+  return transport.convertFromRawMessage(rawMessage as RawMessageType);
+}
+
+function extractAssistantText(message: InternalMessage): string {
+  const sessionMessage = getSessionMessageFromRaw(
+    message.rawMessage,
+    message.apiMode,
+    message.baseUrl,
+  );
+  return extractTextFromSessionMessage(sessionMessage);
 }
 
 function findLastAssistantMessage(messages: InternalMessage[]): InternalMessage | undefined {
@@ -117,7 +142,7 @@ export class PixiAgentBackend implements ChatBackend {
   }
 
   async sendUserMessage(input: string): Promise<ChatResponse> {
-    const userMessage: SessionMessage = {
+    const userMessage: Omit<SessionMessage, 'messageId'> = {
       type: 'session_message',
       role: 'user',
       content: input,
@@ -129,7 +154,7 @@ export class PixiAgentBackend implements ChatBackend {
 
     const lastAssistant = findLastAssistantMessage(this.agent.sessionThread.threadMessages);
     const text = lastAssistant
-      ? extractAssistantText(lastAssistant.rawMessage)
+      ? extractAssistantText(lastAssistant)
       : '(assistant did not return a message)';
 
     return {

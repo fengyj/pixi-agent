@@ -1,5 +1,14 @@
 import { z } from 'zod';
-import { ToolCallPart, ToolResultPart } from '../message';
+import {
+  AudioPart,
+  ContentPart,
+  DocumentPart,
+  ImagePart,
+  TextPart,
+  ToolCallPart,
+  ToolResultPart,
+  VideoPart,
+} from '../message';
 
 export interface ToolCallOptions {
   signal?: AbortSignal | undefined | null;
@@ -12,6 +21,25 @@ export const ToolDefinitionSchema = z.object({
   name: z.string(),
   description: z.string(),
   parameters: z.record(z.string(), z.unknown()),
+  extraInfo: z
+    .object({
+      kind: z
+        .union([
+          z.literal('read'),
+          z.literal('write'),
+          z.literal('delete'),
+          z.literal('move'),
+          z.literal('search'),
+          z.literal('execute'),
+          z.literal('think'),
+          z.literal('fetch'),
+          z.literal('switch_mode'),
+          z.literal('other'),
+        ])
+        .optional(),
+      title: z.string().optional(),
+    })
+    .optional(),
 });
 
 export type ToolDefinition = z.infer<typeof ToolDefinitionSchema>;
@@ -48,7 +76,7 @@ export function defineTool<
   /**
    * A function to check if the tool can be called, e.g. check if the API key is set
    * or if the user has permission to use the tool.
-   * @param options the options for the tool call, including signal for abortion, 
+   * @param options the options for the tool call, including signal for abortion,
    *                timeout, maxRetries, and environment variables.
    * @returns true if the tool can be called, false otherwise.
    */
@@ -98,11 +126,7 @@ export class ToolRegistry {
     }
     const sets = activeToolsets.map((n) => this.toolsets.get(n)!).filter(Boolean);
 
-    return sets.flatMap((ts) =>
-      ts.tools
-        .filter((t) => t.funcChecker())
-        .map((t) => t.definition),
-    );
+    return sets.flatMap((ts) => ts.tools.filter((t) => t.funcChecker()).map((t) => t.definition));
   }
 
   getTool(name: string): Tool | undefined {
@@ -133,6 +157,24 @@ export class ToolRegistry {
       }
       const parsedInput = tool.schema.parse(toolCall.arguments);
       const result = await tool.handler(parsedInput, options);
+      if (Array.isArray(result) && result.length > 0) {
+        if (
+          result.every(
+            (r) =>
+              r &&
+              typeof r === 'object' &&
+              'type' in r &&
+              ['text', 'image', 'document', 'audio', 'video'].includes((r as ContentPart).type),
+          )
+        ) {
+          return {
+            type: 'tool_result',
+            id: toolCall.id,
+            name: toolCall.name,
+            result: result as Array<TextPart | ImagePart | DocumentPart | AudioPart | VideoPart>,
+          };
+        }
+      }
       return {
         type: 'tool_result',
         id: toolCall.id,

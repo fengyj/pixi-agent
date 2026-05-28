@@ -9,6 +9,7 @@ import type {
   ToolResultBlockParam,
   ThinkingBlockParam,
   RawContentBlockDelta,
+  ServerToolUseBlockParam,
 } from '@anthropic-ai/sdk/resources/messages';
 import type {
   Message,
@@ -24,6 +25,7 @@ import {
   ModelResponse,
 } from './base';
 import {
+  AnthropicApiMessage,
   ApiModes,
   SessionMessage,
   ContentPart,
@@ -33,6 +35,8 @@ import {
   ToolResultPart,
   ImagePart,
   DocumentPart,
+  RefusalPart,
+  RoleType,
 } from '../message';
 import {
   AgentInterruptedError,
@@ -41,7 +45,7 @@ import {
 } from '../errors/types';
 import { isLikelyAbortError, isLikelyTimeoutError } from '../errors/guards';
 
-export class AnthropicTransport extends ProviderTransport<MessageParam> {
+export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
   readonly client: Anthropic;
   private static readonly OFFICIAL_BASE_URL = 'https://api.anthropic.com';
   private readonly configuredBaseUrl?: string;
@@ -59,7 +63,7 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
     baseUrl?: string,
     apiKey?: string,
     dialectResolver?: DialectResolver<
-      MessageParam,
+      AnthropicApiMessage,
       RawContentBlockDelta,
       MessageStreamParams,
       Message
@@ -70,221 +74,82 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
     this.client = new Anthropic({ baseURL: this.configuredBaseUrl, apiKey });
   }
 
-  // ─── convertFromRawMessage ────────────────────────────────────────────────
-
-  private getFromAssistantMessageParam(rawMsg: MessageParam): SessionMessage {
-    if (typeof rawMsg.content === 'string') {
-      return { type: 'session_message', role: 'assistant', content: rawMsg.content };
-    }
-    const parts: ContentPart[] = [];
-    for (const block of rawMsg.content) {
-      if (block.type === 'text') {
-        parts.push({ type: 'text', text: block.text } as TextPart);
-      } else if (block.type === 'thinking') {
-        parts.push({
-          type: 'thinking',
-          content: block.thinking,
-          signature: block.signature,
-        } as ThinkingPart);
-      } else if (block.type === 'tool_use') {
-        parts.push({
-          type: 'tool_call',
-          id: block.id,
-          name: block.name,
-          arguments: JSON.stringify(block.input),
-        } as ToolCallPart);
-      }
-      // skip redacted_thinking and other unrecognised block types
-    }
-    return { type: 'session_message', role: 'assistant', content: parts };
-  }
-
-  private getFromUserMessageParam(rawMsg: MessageParam): SessionMessage {
-    if (typeof rawMsg.content === 'string') {
-      return { type: 'session_message', role: 'user', content: rawMsg.content };
-    }
-    const parts: ContentPart[] = [];
-    let hasToolResult = false;
-    let hasOtherContent = false;
-    for (const block of rawMsg.content) {
-      if (block.type === 'text') {
-        parts.push({ type: 'text', text: block.text } as TextPart);
-        hasOtherContent = true;
-      } else if (block.type === 'image') {
-        const src = block.source;
-        if (src.type === 'base64') {
-          parts.push({
-            type: 'image',
-            image: { sourceType: 'base64', mimeType: src.media_type, data: src.data },
-          } as ImagePart);
-        } else if (src.type === 'url') {
-          parts.push({ type: 'image', image: { sourceType: 'url', url: src.url } } as ImagePart);
-        }
-        hasOtherContent = true;
-      } else if (block.type === 'document') {
-        const src = block.source;
-        if (src.type === 'base64') {
-          parts.push({
-            type: 'document',
-            document: { sourceType: 'base64', mimeType: src.media_type, data: src.data },
-          } as DocumentPart);
-        } else if (src.type === 'text') {
-          parts.push({
-            type: 'document',
-            document: { sourceType: 'base64', mimeType: src.media_type, data: src.data },
-          } as DocumentPart);
-        } else if (src.type === 'url') {
-          parts.push({
-            type: 'document',
-            document: { sourceType: 'url', url: src.url },
-          } as DocumentPart);
-        }
-        // 'content' source type has no direct equivalent in DocumentPart — skip
-        hasOtherContent = true;
-      } else if (block.type === 'tool_result') {
-        const content = block.content;
-        let result = '';
-        if (typeof content === 'string') {
-          result = content;
-        } else if (Array.isArray(content)) {
-          const textBlock = content.find((b) => b.type === 'text');
-          if (textBlock && textBlock.type === 'text') result = textBlock.text;
-        }
-        parts.push({
-          type: 'tool_result',
-          id: block.tool_use_id,
-          result,
-          isError: block.is_error ?? undefined,
-        } as ToolResultPart);
-        hasToolResult = true;
-      }
-    }
-    return {
-      type: 'session_message',
-      role: hasToolResult && !hasOtherContent ? 'tool' : 'user',
-      content: parts,
-    };
-  }
-
-  convertFromRawMessage(rawMsg: MessageParam): SessionMessage {
+  convertFromRawMessage(rawMsg: AnthropicApiMessage): SessionMessage {
+    const inner = rawMsg.content;
     const msg = (() => {
-      switch (rawMsg.role) {
-        case 'assistant':
-          return this.getFromAssistantMessageParam(rawMsg);
-        case 'user':
-          return this.getFromUserMessageParam(rawMsg);
-        default:
-          throw new InvalidMessageError(`Unsupported message role: ${rawMsg.role}`);
+      let content: string | ContentPart[] | undefined = undefined;
+      let role: RoleType = rawMsg.role;
+      if (typeof inner.content === 'string') {
+        content = inner.content;
+      } else if (Array.isArray(inner.content)) {
+        content = inner.content
+          .map((block) => {
+            if (block.type === 'text') {
+              return this.convertToTextPart(block);
+            } else if (block.type === 'thinking') {
+              return this.convertToThinkingPart(block);
+            } else if (block.type === 'image') {
+              return this.convertToImagePart(block);
+            } else if (block.type === 'document') {
+              return this.convertToDocumentPart(block);
+            } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
+              return this.convertToToolCallPart(block as ToolUseBlockParam | ServerToolUseBlockParam);
+            } else if (block.type === 'tool_result') {
+              role = 'tool';
+              return this.convertToToolResultPart(block);
+            } else {
+              return null;
+            }
+          })
+          .filter((part) => part !== null);
       }
+      return {
+        messageId: rawMsg.messageId,
+        type: 'session_message',
+        role,
+        content,
+        metadata: rawMsg.metadata,
+      } as SessionMessage;
     })();
     return this.dialectResolver ? this.dialectResolver.manipulateMessage(msg, rawMsg) : msg;
   }
 
-  // ─── convertToRawMessage (pure — dialect is applied in buildStreamParams) ─
+  convertToRawMessage(msg: SessionMessage): AnthropicApiMessage {
+    const inner = (() => {
+      return {
+        role: msg.role === 'tool' ? 'user' : msg.role,
+        content:
+          typeof msg.content === 'string'
+            ? msg.content
+            : msg.content
+                .map((part) => {
+                  if (part.type === 'text' || part.type === 'refusal') {
+                    return this.convertToTextBlockParam(part as TextPart | RefusalPart);
+                  } else if (part.type === 'thinking') {
+                    return this.convertToThinkingBlockParam(part as ThinkingPart);
+                  } else if (part.type === 'image') {
+                    return this.convertToImageBlockParam(part as ImagePart);
+                  } else if (part.type === 'document') {
+                    return this.convertToDocumentBlockParam(part as DocumentPart);
+                  } else if (part.type === 'tool_call') {
+                    return this.convertToToolUseBlockParam(part as ToolCallPart);
+                  } else if (part.type === 'tool_result') {
+                    return this.convertToToolResultBlockParam(part as ToolResultPart);
+                  } else {
+                    return null;
+                  }
+                })
+                .filter((part) => part !== null),
+      };
+    })() as MessageParam;
 
-  private getAssistantMessageParam(msg: SessionMessage): MessageParam {
-    if (!msg.content) return { role: 'assistant', content: '' };
-    if (typeof msg.content === 'string') return { role: 'assistant', content: msg.content };
-    const blocks: (TextBlockParam | ThinkingBlockParam | ToolUseBlockParam)[] = [];
-    for (const part of msg.content) {
-      if (part.type === 'text') {
-        blocks.push({ type: 'text', text: (part as TextPart).text });
-      } else if (part.type === 'thinking') {
-        const tp = part as ThinkingPart;
-        // Only include thinking blocks that carry a signature (required by the Anthropic API).
-        // Dialect resolvers (e.g. DeepSeek) may inject unsigned thinking blocks via manipulateRawMessage.
-        if (tp.signature) {
-          blocks.push({ type: 'thinking', thinking: tp.content, signature: tp.signature });
-        }
-      } else if (part.type === 'tool_call') {
-        const tc = part as ToolCallPart;
-        blocks.push({
-          type: 'tool_use',
-          id: tc.id,
-          name: tc.name,
-          input: JSON.parse(tc.arguments || '{}'),
-        });
-      }
-    }
-    return { role: 'assistant', content: blocks };
-  }
-
-  private getUserMessageParam(msg: SessionMessage): MessageParam {
-    if (!msg.content || (typeof msg.content !== 'string' && msg.content.length === 0)) {
-      throw new InvalidMessageError('User message must have non-empty content.');
-    }
-    if (typeof msg.content === 'string') return { role: 'user', content: msg.content };
-    const blocks: (TextBlockParam | ImageBlockParam | DocumentBlockParam)[] = [];
-    for (const part of msg.content) {
-      if (part.type === 'text') {
-        blocks.push({ type: 'text', text: (part as TextPart).text });
-      } else if (part.type === 'image') {
-        const img = (part as ImagePart).image;
-        if (img.sourceType === 'base64') {
-          blocks.push({
-            type: 'image',
-            source: {
-              type: 'base64',
-              media_type: img.mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-              data: img.data,
-            },
-          });
-        } else if (img.sourceType === 'url') {
-          blocks.push({ type: 'image', source: { type: 'url', url: img.url } });
-        }
-      } else if (part.type === 'document') {
-        const doc = (part as DocumentPart).document;
-        if (doc.sourceType === 'base64') {
-          if (doc.mimeType === 'text/plain') {
-            blocks.push({
-              type: 'document',
-              source: { type: 'text', media_type: 'text/plain', data: doc.data! },
-            });
-          } else {
-            blocks.push({
-              type: 'document',
-              source: { type: 'base64', media_type: 'application/pdf', data: doc.data! },
-            });
-          }
-        } else if (doc.sourceType === 'url') {
-          blocks.push({ type: 'document', source: { type: 'url', url: doc.url! } });
-        }
-        // file_id not supported by this SDK version — skip
-      }
-    }
-    return { role: 'user', content: blocks };
-  }
-
-  private getToolMessageParam(msg: SessionMessage): MessageParam {
-    if (!msg.content || typeof msg.content === 'string' || msg.content.length === 0) {
-      throw new InvalidMessageError(
-        'Tool message content must be a non-empty array of content parts.',
-      );
-    }
-    const blocks: ToolResultBlockParam[] = msg.content
-      .map((p) => p as ToolResultPart)
-      .map((p) => ({
-        type: 'tool_result' as const,
-        tool_use_id: p.id,
-        content: p.result,
-        is_error: p.isError,
-      }));
-    return { role: 'user', content: blocks };
-  }
-
-  convertToRawMessage(msg: SessionMessage): MessageParam {
-    const rawMsg = (() => {
-      switch (msg.role) {
-        case 'assistant':
-          return this.getAssistantMessageParam(msg);
-        case 'user':
-          return this.getUserMessageParam(msg);
-        case 'tool':
-          return this.getToolMessageParam(msg);
-        default:
-          throw new InvalidMessageError(`Unsupported message role: ${msg.role}`);
-      }
-    })();
+    const rawMsg: AnthropicApiMessage = {
+      messageId: msg.messageId,
+      type: 'anthropic_api_message',
+      role: msg.role,
+      content: inner,
+      metadata: msg.metadata,
+    };
     return this.dialectResolver ? this.dialectResolver.manipulateRawMessage(rawMsg, msg) : rawMsg;
   }
 
@@ -297,13 +162,13 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
       case 'disable':
         return { type: 'disabled' };
       case 'low':
-        return { type: 'enabled', budget_tokens: 1024 };
+        return { type: 'enabled', budget_tokens: 1024, display: 'summarized' };
       case 'medium':
-        return { type: 'enabled', budget_tokens: 4096 };
+        return { type: 'enabled', budget_tokens: 4096, display: 'summarized' };
       case 'high':
-        return { type: 'enabled', budget_tokens: 16000 };
+        return { type: 'enabled', budget_tokens: 16000, display: 'summarized' };
       case 'extreme':
-        return { type: 'enabled', budget_tokens: 32000 };
+        return { type: 'enabled', budget_tokens: 32000, display: 'summarized' };
       default:
         return undefined;
     }
@@ -331,15 +196,12 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
         const a =
           typeof last.content === 'string'
             ? [{ type: 'text' as const, text: last.content }]
-            : // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              [...(last.content as any[])];
+            : [...last.content];
         const b =
           typeof msg.content === 'string'
             ? [{ type: 'text' as const, text: msg.content }]
-            : // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              [...(msg.content as any[])];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        last.content = [...a, ...b] as any;
+            : [...msg.content];
+        last.content = [...a, ...b];
       } else {
         result.push({ ...msg });
       }
@@ -349,9 +211,9 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
 
   private buildStreamParams(
     options: ModelOptions,
-    messages: Array<MessageParam>,
+    messages: Array<AnthropicApiMessage>,
   ): MessageStreamParams {
-    const mergedMessages = this.mergeConsecutiveSameRoleMessages(messages);
+    const mergedMessages = this.mergeConsecutiveSameRoleMessages(messages.map((m) => m.content));
 
     const tools: AnthropicTool[] | undefined = options.tools?.map(
       (t) =>
@@ -404,10 +266,26 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
     return streamRequestOptions;
   }
 
-  private toModelResponse(response: Message): ModelResponse<MessageParam> {
+  private toModelResponse(
+    response: Message,
+  ): ModelResponse<Omit<AnthropicApiMessage, 'messageId'>> {
+    const responseMessage: Omit<AnthropicApiMessage, 'messageId'> = {
+      type: 'anthropic_api_message',
+      role: 'assistant',
+      content: {
+        role: response.role,
+        content: response.content,
+      },
+      metadata: {
+        pixiagent_response_id: response.id,
+        pixiagent_response_stop_details: response.stop_details,
+        pixiagent_response_stop_reason: response.stop_reason,
+        pixiagent_response_stop_sequence: response.stop_sequence,
+      },
+    };
     return {
       responseId: response.id,
-      responseMessage: response,
+      responseMessage: responseMessage,
       responseModel: response.model,
       stopReason:
         this.dialectResolver?.extractFromResponse('stop_reason', response) ??
@@ -428,20 +306,23 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
           undefined,
         totalTokens: response.usage.input_tokens + response.usage.output_tokens,
       },
-    } as ModelResponse<MessageParam>;
+    } as ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>;
   }
 
   private async generateWithOfficialStream(
     params: MessageStreamParams,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<MessageParam>> {
+  ): Promise<ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>> {
     let textChunkStarted = false;
     let thinkingChunkStarted = false;
     let thinkingText = '';
     let currentToolName: string | undefined;
 
-    const stream = this.client.messages.stream(params, this.getStreamRequestOptions(requestOptions));
+    const stream = this.client.messages.stream(
+      params,
+      this.getStreamRequestOptions(requestOptions),
+    );
 
     for await (const event of stream) {
       if (event.type === 'content_block_start') {
@@ -505,7 +386,7 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
     params: MessageStreamParams,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<MessageParam>> {
+  ): Promise<ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>> {
     let textChunkStarted = false;
     let thinkingChunkStarted = false;
     let thinkingText = '';
@@ -623,13 +504,12 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
 
     if (Array.isArray(response.content)) {
       for (const [index, partialJson] of toolInputJsonByIndex.entries()) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const block = (response.content as any[])[index];
+        const block = response.content[index];
         if (block?.type === 'tool_use' && partialJson.length > 0) {
           try {
             block.input = JSON.parse(partialJson);
           } catch {
-            block.input = {};
+            block.input = partialJson; // fallback to raw string if JSON parsing fails
           }
         }
       }
@@ -640,10 +520,10 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
 
   async generate(
     options: ModelOptions,
-    messages: Array<MessageParam>,
+    messages: Array<AnthropicApiMessage>,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<MessageParam>> {
+  ): Promise<ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>> {
     const params = this.buildStreamParams(options, messages);
 
     try {
@@ -696,5 +576,192 @@ export class AnthropicTransport extends ProviderTransport<MessageParam> {
       default:
         return finishReason;
     }
+  }
+
+  private convertToTextBlockParam(part: TextPart | RefusalPart): TextBlockParam {
+    return { type: 'text', text: part.type === 'text' ? part.text : part.reason };
+  }
+
+  private convertToThinkingBlockParam(part: ThinkingPart): ThinkingBlockParam {
+    return { type: 'thinking', thinking: part.content, signature: '' };
+  }
+
+  private convertToImageBlockParam(part: ImagePart): ImageBlockParam | null {
+    const img = part.image;
+    if (img.sourceType === 'base64') {
+      if (
+        img.mimeType === 'image/jpeg' ||
+        img.mimeType === 'image/png' ||
+        img.mimeType === 'image/gif' ||
+        img.mimeType === 'image/webp'
+      ) {
+        return {
+          type: 'image',
+          source: { type: 'base64', media_type: img.mimeType, data: img.data },
+        };
+      }
+    } else if (img.sourceType === 'url') {
+      return { type: 'image', source: { type: 'url', url: img.url } };
+    }
+    return null;
+  }
+
+  private convertToDocumentBlockParam(part: DocumentPart): DocumentBlockParam | null {
+    const doc = part.document;
+    if (doc.sourceType === 'base64') {
+      if (doc.mimeType === 'text/plain') {
+        return {
+          type: 'document',
+          source: { type: 'text', media_type: 'text/plain', data: doc.data! },
+        };
+      } else if (doc.mimeType === 'application/pdf') {
+        return {
+          type: 'document',
+          source: { type: 'base64', media_type: 'application/pdf', data: doc.data! },
+        };
+      }
+    } else if (doc.sourceType === 'url') {
+      return { type: 'document', source: { type: 'url', url: doc.url! } };
+    }
+    return null;
+  }
+
+  private convertToToolUseBlockParam(part: ToolCallPart): ToolUseBlockParam {
+    try {
+      return {
+        type: 'tool_use',
+        id: part.id,
+        name: part.name,
+        input: JSON.parse(part.arguments || '{}'),
+      };
+    } catch {
+      return {
+        type: 'tool_use',
+        id: part.id,
+        name: part.name,
+        input: part.arguments,
+      };
+    }
+  }
+
+  private convertToToolResultBlockParam(part: ToolResultPart): ToolResultBlockParam {
+    if (typeof part.result === 'string') {
+      return {
+        type: 'tool_result',
+        tool_use_id: part.id,
+        content: part.result,
+        is_error: part.isError ?? undefined,
+      };
+    } else if (Array.isArray(part.result)) {
+      return {
+        type: 'tool_result',
+        tool_use_id: part.id,
+        content: part.result
+          .map((p) => {
+            if (p.type === 'text') {
+              return this.convertToTextBlockParam(p as TextPart);
+            } else if (p.type === 'image') {
+              return this.convertToImageBlockParam(p as ImagePart);
+            } else if (p.type === 'document') {
+              return this.convertToDocumentBlockParam(p as DocumentPart);
+            }
+            // skip unrecognized or unsupported content parts
+            return null;
+          })
+          .filter((b): b is TextBlockParam | ImageBlockParam | DocumentBlockParam => b !== null),
+        is_error: part.isError ?? undefined,
+      };
+    } else {
+      throw new InvalidMessageError(
+        'ToolResultPart result must be a string or an array of ContentParts.',
+      );
+    }
+  }
+
+  convertToTextPart(block: TextBlockParam): TextPart {
+    return { type: 'text', text: block.text };
+  }
+
+  convertToThinkingPart(block: ThinkingBlockParam): ThinkingPart {
+    return { type: 'thinking', content: block.thinking };
+  }
+
+  convertToImagePart(block: ImageBlockParam): ImagePart {
+    if (block.source.type === 'base64') {
+      return {
+        type: 'image',
+        image: { sourceType: 'base64', mimeType: block.source.media_type, data: block.source.data },
+      };
+    } else if (block.source.type === 'url') {
+      return { type: 'image', image: { sourceType: 'url', url: block.source.url } };
+    }
+    throw new InvalidMessageError('Unsupported ImageBlockParam source type.');
+  }
+
+  convertToDocumentPart(block: DocumentBlockParam): DocumentPart | TextPart {
+    if (block.source.type === 'base64') {
+      return {
+        type: 'document',
+        document: {
+          sourceType: 'base64',
+          mimeType: block.source.media_type,
+          data: block.source.data,
+        },
+      };
+    } else if (block.source.type === 'text') {
+      return {
+        type: 'text',
+        text: block.source.data,
+      };
+    } else if (block.source.type === 'url') {
+      return { type: 'document', document: { sourceType: 'url', url: block.source.url } };
+    }
+    throw new InvalidMessageError('Unsupported DocumentBlockParam source type.');
+  }
+
+  convertToToolCallPart(block: ToolUseBlockParam | ServerToolUseBlockParam): ToolCallPart {
+    if (block.type === 'server_tool_use') {
+      return {
+        type: 'tool_call',
+        id: block.id,
+        name: block.name,
+        arguments: ContentPart.createProviderToolCallArguments('anthropic', block.type, block),
+      };
+    }
+
+    return {
+      type: 'tool_call',
+      id: block.id,
+      name: block.name,
+      arguments: JSON.stringify(block.input),
+    };
+  }
+
+  convertToToolResultPart(block: ToolResultBlockParam): ToolResultPart {
+    let result: string | Array<TextPart | ImagePart | DocumentPart> = '';
+    if (typeof block.content === 'string') {
+      result = block.content;
+    } else if (Array.isArray(block.content)) {
+      result = block.content.map((b) => {
+        switch (b.type) {
+          case 'text':
+            return this.convertToTextPart(b);
+          case 'image':
+            return this.convertToImagePart(b);
+          case 'document':
+            return this.convertToDocumentPart(b);
+          default:
+            throw new InvalidMessageError(
+              `Unsupported content block type in tool result: ${b.type}`,
+            );
+        }
+      });
+    }
+    return {
+      type: 'tool_result',
+      id: block.tool_use_id,
+      result,
+      isError: block.is_error ?? undefined,
+    };
   }
 }

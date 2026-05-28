@@ -25,6 +25,7 @@ import type {
 } from 'openai/resources/chat/completions';
 import {
   ApiModes,
+  ChatCompletionApiMessage,
   SessionMessage,
   ToolCallPart,
   TextPart,
@@ -43,7 +44,7 @@ import {
 import { isLikelyAbortError, isLikelyTimeoutError } from '../errors/guards';
 import { OpenAI } from 'openai/client';
 
-export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMessageParam> {
+export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApiMessage> {
   readonly client: OpenAI;
   private static readonly OFFICIAL_BASE_URL = 'https://api.openai.com/v1';
   private readonly configuredBaseUrl?: string;
@@ -61,7 +62,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     baseUrl?: string,
     apiKey?: string,
     dialectResolver?: DialectResolver<
-      ChatCompletionMessageParam,
+      ChatCompletionApiMessage,
       ChatCompletionChunk.Choice.Delta,
       ChatCompletionStreamParams,
       ChatCompletion
@@ -79,19 +80,25 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     return ApiModes.COMPLETIONS;
   }
 
-  private getFromAssistantMessageParam(msg: ChatCompletionAssistantMessageParam): SessionMessage {
-    if (msg.refusal) {
-      return {
-        type: 'session_message',
-        role: 'assistant',
-        content: undefined,
-        refusal: msg.refusal,
-        name: msg.name,
-      } as SessionMessage;
-    }
-
+  private getFromAssistantMessageParam(rawMsg: ChatCompletionApiMessage): SessionMessage {
+    const msg = rawMsg.content as ChatCompletionAssistantMessageParam;
     const parts = [] as ContentPart[];
-    // msg.audio is skipped
+
+    if (msg.refusal) {
+      parts.push({
+        type: 'refusal',
+        reason: msg.refusal,
+      } as RefusalPart);
+    }
+    if (msg.audio) {
+      parts.push({
+        type: 'audio',
+        audio: {
+          sourceType: 'file_id',
+          fileId: msg.audio.id,
+        },
+      } as AudioPart);
+    }
     if (msg.function_call) {
       parts.push({
         type: 'tool_call',
@@ -109,17 +116,30 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
             name: toolCall.function.name,
             arguments: toolCall.function.arguments,
           } as ToolCallPart);
+          return;
         }
-        // skip the custom tool
+
+        // For custom/non-function tool call variants, preserve raw provider data
+        parts.push({
+          type: 'tool_call',
+          id: toolCall.id,
+          name:
+            typeof (toolCall as { custom?: { name?: string } }).custom?.name === 'string'
+              ? (toolCall as { custom: { name: string } }).custom.name
+              : toolCall.id,
+          arguments: ContentPart.createProviderToolCallArguments('openai_chat', toolCall.type, toolCall),
+        } as ToolCallPart);
       });
     }
-
     if (typeof msg.content === 'string') {
       if (parts.length === 0) {
         return {
+          messageId: rawMsg.messageId,
+          type: 'session_message',
           role: 'assistant',
           content: msg.content,
           name: msg.name,
+          metadata: rawMsg.metadata,
         } as SessionMessage;
       } else {
         parts.push({
@@ -130,102 +150,64 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     } else if (msg.content instanceof Array) {
       msg.content.forEach((contentPart) => {
         if (contentPart.type === 'text') {
-          parts.push({
-            type: 'text',
-            text: contentPart.text,
-          } as TextPart);
+          parts.push(this.convertFromChatCompletionTextPart(contentPart));
         } else if (contentPart.type === 'refusal') {
-          parts.push({
-            type: 'refusal',
-            reason: contentPart.refusal,
-          } as RefusalPart);
+          parts.push(this.convertFromChatCompletionRefusalPart(contentPart));
         }
       });
     }
 
     return {
+      messageId: rawMsg.messageId,
       type: 'session_message',
       role: 'assistant',
       content: parts,
       name: msg.name,
-      refusal: msg.refusal,
+      metadata: rawMsg.metadata,
     } as SessionMessage;
   }
 
-  private getFromUserMessageParam(msg: ChatCompletionUserMessageParam): SessionMessage {
+  private getFromUserMessageParam(rawMsg: ChatCompletionApiMessage): SessionMessage {
+    const msg = rawMsg.content as ChatCompletionUserMessageParam;
     if (typeof msg.content === 'string') {
       return {
+        messageId: rawMsg.messageId,
         type: 'session_message',
         role: 'user',
         content: msg.content,
         name: msg.name,
+        metadata: rawMsg.metadata,
       } as SessionMessage;
     }
 
     const parts = [] as ContentPart[];
     msg.content.forEach((contentPart) => {
       if (contentPart.type === 'text') {
-        parts.push({
-          type: 'text',
-          text: contentPart.text,
-        } as TextPart);
+        parts.push(this.convertFromChatCompletionTextPart(contentPart));
       } else if (contentPart.type === 'image_url') {
-        const isBase64 = contentPart.image_url.url.startsWith('data:image/');
-        if (isBase64) {
-          const mediaType = contentPart.image_url.url.split(';')[0].split(':')[1];
-          const base64Data = contentPart.image_url.url.split(',')[1];
-        parts.push({
-          type: 'image',
-          image: {
-            sourceType: 'base64',
-            data: base64Data,
-            mimeType: mediaType,
-          },
-        } as ImagePart);}
-        else {
-        parts.push({
-          type: 'image',
-          image: {
-            sourceType: 'url',
-            url: contentPart.image_url.url,
-          },
-        } as ImagePart);}
+        parts.push(this.convertFromChatCompletionImagePart(contentPart));
       } else if (contentPart.type === 'input_audio') {
-        parts.push({
-          type: 'audio',
-          audio: {
-            sourceType: 'base64',
-            data: contentPart.input_audio.data,
-            mimeType: `audio/${contentPart.input_audio.format}`,
-          },
-        } as AudioPart);
+        parts.push(this.convertFromChatCompletionAudioPart(contentPart));
       } else if (contentPart.type === 'file') {
-        parts.push({
-          type: 'document',
-          document: {
-            sourceType: contentPart.file.file_data
-              ? 'base64'
-              : contentPart.file.file_id
-                ? 'file_id'
-                : 'url', // fallback to url, though it's not supported in current implementation
-            data: contentPart.file.file_data ?? undefined,
-            fileId: contentPart.file.file_id ?? undefined,
-            fileName: contentPart.file.filename ?? undefined,
-            mediaType: contentPart.file.file_data ? '' : undefined,
-          },
-        } as DocumentPart);
+        const filePart = this.convertFromChatCompletionFilePart(contentPart);
+        if (filePart) {
+          parts.push(filePart);
+        }
       }
     });
 
     return {
+      messageId: rawMsg.messageId,
       type: 'session_message',
       role: 'user',
       content: parts,
       name: msg.name,
+      metadata: rawMsg.metadata,
     } as SessionMessage;
   }
 
-  private getFromToolMessageParam(msg: ChatCompletionToolMessageParam): SessionMessage {
+  private getFromToolMessageParam(rawMsg: ChatCompletionApiMessage): SessionMessage {
+    const msg = rawMsg.content as ChatCompletionToolMessageParam;
     if (!msg.content || (typeof msg.content !== 'string' && msg.content.length === 0)) {
       throw new InvalidMessageError('Tool message must have content');
     }
@@ -245,25 +227,23 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
             id: msg.tool_call_id,
             result: contentPart.text,
           } as ToolResultPart);
-        } else {
-          toolResultParts.push({
-            type: 'tool_result',
-            id: msg.tool_call_id,
-            result: JSON.parse(contentPart.text),
-          } as ToolResultPart);
-        }
+        } 
       });
     }
 
     return {
+      messageId: rawMsg.messageId,
       type: 'session_message',
       role: 'tool',
       content: toolResultParts,
+      metadata: rawMsg.metadata,
     } as SessionMessage;
   }
 
-  private getFromFunctionMessageParam(msg: ChatCompletionFunctionMessageParam): SessionMessage {
+  private getFromFunctionMessageParam(rawMsg: ChatCompletionApiMessage): SessionMessage {
+    const msg = rawMsg.content as ChatCompletionFunctionMessageParam;
     return {
+      messageId: rawMsg.messageId,
       type: 'session_message',
       role: 'assistant',
       content: [
@@ -274,22 +254,174 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
           arguments: msg.content,
         } as ToolCallPart,
       ],
+      metadata: rawMsg.metadata,
     } as SessionMessage;
   }
 
-  convertFromRawMessage(rawMsg: ChatCompletionMessageParam): SessionMessage {
+  private convertFromChatCompletionTextPart(part: ChatCompletionContentPartText): TextPart {
+    return { type: 'text', text: part.text };
+  }
+
+  private convertFromChatCompletionRefusalPart(
+    part: ChatCompletionContentPartRefusal,
+  ): RefusalPart {
+    return { type: 'refusal', reason: part.refusal };
+  }
+
+  private convertFromChatCompletionImagePart(part: ChatCompletionContentPartImage): ImagePart {
+    const isBase64 = part.image_url.url.startsWith('data:image/');
+    if (isBase64) {
+      const mediaType = part.image_url.url.split(';')[0].split(':')[1];
+      const base64Data = part.image_url.url.split(',')[1];
+      return {
+        type: 'image',
+        image: {
+          sourceType: 'base64',
+          data: base64Data,
+          mimeType: mediaType,
+        },
+      };
+    }
+    return {
+      type: 'image',
+      image: {
+        sourceType: 'url',
+        url: part.image_url.url,
+      },
+    };
+  }
+
+  private convertFromChatCompletionAudioPart(part: ChatCompletionContentPartInputAudio): AudioPart {
+    return {
+      type: 'audio',
+      audio: {
+        sourceType: 'base64',
+        data: part.input_audio.data,
+        mimeType: `audio/${part.input_audio.format}`,
+      },
+    };
+  }
+
+  private convertFromChatCompletionFilePart(
+    part: ChatCompletionContentPart.File,
+  ): DocumentPart | null {
+    if (part.file.file_data) {
+      return {
+        type: 'document',
+        document: {
+          sourceType: 'base64',
+          mimeType: 'application/octet-stream', // todo: check the file name if possible to determine the mime type
+          data: part.file.file_data,
+          fileName: part.file.filename ?? undefined,
+        },
+      };
+    }
+
+    if (part.file.file_id) {
+      return {
+        type: 'document',
+        document: {
+          sourceType: 'file_id',
+          fileId: part.file.file_id,
+          fileName: part.file.filename ?? undefined,
+        },
+      };
+    }
+
+    return null;
+  }
+
+  private convertToChatCompletionTextPart(part: TextPart): ChatCompletionContentPartText {
+    return { type: 'text', text: part.text };
+  }
+
+  private convertToChatCompletionRefusalPart(part: RefusalPart): ChatCompletionContentPartRefusal {
+    return { type: 'refusal', refusal: part.reason };
+  }
+
+  private convertToChatCompletionImagePart(part: ImagePart): ChatCompletionContentPartImage | null {
+    switch (part.image.sourceType) {
+      case 'url':
+        return { type: 'image_url', image_url: { url: part.image.url } };
+      case 'base64':
+        return {
+          type: 'image_url',
+          image_url: { url: `data:${part.image.mimeType};base64,${part.image.data}` },
+        };
+      default:
+        return null;
+    }
+  }
+
+  private convertToChatCompletionAudioPart(
+    part: AudioPart,
+  ): ChatCompletionContentPartInputAudio | null {
+    if (part.audio.sourceType !== 'base64') {
+      return null;
+    }
+    const format = part.audio.mimeType.replace('audio/', '');
+    return {
+      type: 'input_audio',
+      input_audio: {
+        data: part.audio.data,
+        format: format as 'wav' | 'mp3',
+      },
+    };
+  }
+
+  private convertToChatCompletionFilePart(part: DocumentPart): ChatCompletionContentPart.File {
+    return {
+      type: 'file',
+      file: {
+        file_data: part.document.sourceType === 'base64' ? part.document.data : undefined,
+        file_id: part.document.sourceType === 'file_id' ? part.document.fileId : undefined,
+        filename: part.document.fileName ?? undefined,
+      },
+    };
+  }
+
+  private convertToChatCompletionAssistantContentPart(
+    part: ContentPart,
+  ): ChatCompletionContentPartText | ChatCompletionContentPartRefusal | null {
+    if (part.type === 'text') {
+      return this.convertToChatCompletionTextPart(part as TextPart);
+    }
+    if (part.type === 'refusal') {
+      return this.convertToChatCompletionRefusalPart(part as RefusalPart);
+    }
+    return null;
+  }
+
+  private convertToChatCompletionUserContentPart(
+    part: ContentPart,
+  ): ChatCompletionContentPart | null {
+    switch (part.type) {
+      case 'text':
+        return this.convertToChatCompletionTextPart(part as TextPart);
+      case 'image':
+        return this.convertToChatCompletionImagePart(part as ImagePart);
+      case 'audio':
+        return this.convertToChatCompletionAudioPart(part as AudioPart);
+      case 'document':
+        return this.convertToChatCompletionFilePart(part as DocumentPart);
+      default:
+        return null;
+    }
+  }
+
+  convertFromRawMessage(rawMsg: ChatCompletionApiMessage): SessionMessage {
     const message = (() => {
-      switch (rawMsg.role) {
+      switch (rawMsg.content.role) {
         case 'assistant':
-          return this.getFromAssistantMessageParam(rawMsg as ChatCompletionAssistantMessageParam);
+          return this.getFromAssistantMessageParam(rawMsg);
         case 'user':
-          return this.getFromUserMessageParam(rawMsg as ChatCompletionUserMessageParam);
+          return this.getFromUserMessageParam(rawMsg);
         case 'tool':
-          return this.getFromToolMessageParam(rawMsg as ChatCompletionToolMessageParam);
+          return this.getFromToolMessageParam(rawMsg);
         case 'function':
-          return this.getFromFunctionMessageParam(rawMsg as ChatCompletionFunctionMessageParam);
+          return this.getFromFunctionMessageParam(rawMsg);
         default:
-          throw new InvalidMessageError(`Unsupported message role: ${rawMsg.role}`);
+          throw new InvalidMessageError(`Unsupported message role: ${rawMsg.content.role}`);
       }
     })();
     return this.dialectResolver ? this.dialectResolver.manipulateMessage(message, rawMsg) : message;
@@ -321,36 +453,26 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     const content =
       msg.content instanceof Array
         ? msg.content
-            .filter((part) => part.type === 'text')
-            .map((part) => part as TextPart)
-            .map(
-              (part) =>
-                ({
-                  type: 'text',
-                  text: part.text,
-                }) as ChatCompletionContentPartText | ChatCompletionContentPartRefusal,
-            )
-            .concat(
-              msg.content
-                .filter((part) => part.type === 'refusal')
-                .map((part) => part as RefusalPart)
-                .map(
-                  (part) =>
-                    ({
-                      type: 'refusal',
-                      refusal: part.reason,
-                    }) as ChatCompletionContentPartText | ChatCompletionContentPartRefusal,
-                ),
+            .map((part) => this.convertToChatCompletionAssistantContentPart(part))
+            .filter(
+              (part): part is ChatCompletionContentPartText | ChatCompletionContentPartRefusal =>
+                part !== null,
             )
         : (msg.content ?? null);
+        
+    let messageLevelRefusal: string | undefined = undefined;
+    if (content instanceof Array && content.length === 1 && content[0].type === 'refusal') {
+      messageLevelRefusal = content[0].refusal;
+    }
 
     return {
       role: 'assistant',
-      content: content instanceof Array && content.length === 0 ? null : content,
+      content:
+        (messageLevelRefusal || (content instanceof Array && content.length === 0)) ? null : content,
       tool_calls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
       audio: null, // todo: may need to handle this in the future.
       name: msg.name,
-      refusal: msg.refusal,
+      refusal: messageLevelRefusal,
     } as ChatCompletionAssistantMessageParam;
   }
 
@@ -370,73 +492,9 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
       } as ChatCompletionUserMessageParam;
     }
 
-    const textParts = msg.content
-      .filter((part) => part.type === 'text')
-      .map((part) => part as TextPart)
-      .map(
-        (part) =>
-          ({
-            type: 'text',
-            text: part.text,
-          }) as ChatCompletionContentPartText,
-      );
-    const imageParts = msg.content
-      .filter((part) => part.type === 'image')
-      .map((part) => part as ImagePart)
-      .map(
-        (part) => {
-          switch (part.image.sourceType) {
-            case 'url':
-              return {
-                type: 'image_url',
-                image_url: { url: part.image.url },
-              } as ChatCompletionContentPartImage;
-            case 'base64':
-              return {
-                type: 'image_url',
-                image_url: { url: `data:${part.image.mimeType};base64,${part.image.data}` },
-              } as ChatCompletionContentPartImage;
-            default:
-              throw new InvalidMessageError(
-                `Unsupported image sourceType: ${part.image.sourceType}`,
-              );
-          }
-        }
-      );
-    const audioParts = msg.content
-      .filter((part) => part.type === 'audio')
-      .map((part) => part as AudioPart)
-      .filter(
-        (part) =>
-          part.audio.sourceType === 'base64' &&
-          ['audio/wav', 'audio/mp3'].includes(part.audio.mimeType),
-      )
-      .map(
-        (part) =>
-          ({
-            type: 'input_audio',
-            input_audio: {
-              data: part.audio.sourceType === 'base64' ? part.audio.data : '',
-              format:
-                part.audio.sourceType === 'base64' ? part.audio.mimeType.replace('audio/', '') : '',
-            },
-          }) as ChatCompletionContentPartInputAudio,
-      );
-    const fileParts = msg.content
-      .filter((part) => part.type === 'document')
-      .map((part) => part as DocumentPart)
-      .map(
-        (part) =>
-          ({
-            type: 'file',
-            file: {
-              file_data: part.document.sourceType === 'base64' ? part.document.data : undefined,
-              file_id: part.document.sourceType === 'file_id' ? part.document.fileId : undefined,
-              file_name: part.document.sourceType === 'base64' ? part.document.fileName : undefined,
-            },
-          }) as ChatCompletionContentPart.File,
-      );
-    const content = [...textParts, ...imageParts, ...audioParts, ...fileParts];
+    const content = msg.content
+      .map((part) => this.convertToChatCompletionUserContentPart(part))
+      .filter((part): part is ChatCompletionContentPart => part !== null);
 
     return {
       role: 'user',
@@ -453,21 +511,43 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     }
 
     if (!msg.content || typeof msg.content === 'string' || msg.content.length === 0) {
-      throw new InvalidMessageError('Tool message content must be a non-empty array of content parts.');
+      throw new InvalidMessageError(
+        'Tool message content must be a non-empty array of content parts.',
+      );
     }
 
-    const toolResults = msg.content.filter((part) => part.type === 'tool_result') as ToolResultPart[];
+    const toolResults = msg.content.filter(
+      (part) => part.type === 'tool_result',
+    ) as ToolResultPart[];
     const otherParts = msg.content.filter((part) => part.type !== 'tool_result');
 
     if (toolResults.length === 0) {
-      throw new InvalidMessageError('Tool message content must have at least one tool result part.');
+      throw new InvalidMessageError(
+        'Tool message content must have at least one tool result part.',
+      );
     }
 
-    const rawMessages: ChatCompletionMessageParam[] = toolResults.map((toolResult) => ({
-      role: 'tool',
-      tool_call_id: toolResult.id,
-      content: toolResult.result,
-    }));
+    const rawMessages: ChatCompletionMessageParam[] = toolResults.map((toolResult) => {
+      const content =
+        typeof toolResult.result === 'string'
+          ? toolResult.result
+          : toolResult.result.map((part) => {
+              if (part.type === 'text') {
+                return this.convertToChatCompletionTextPart(part as TextPart);
+              } else {
+                return this.convertToChatCompletionTextPart({
+                  type: 'text',
+                  text: JSON.stringify(part),
+                } as TextPart);
+              }
+            });
+
+      return {
+        role: 'tool',
+        tool_call_id: toolResult.id,
+        content,
+      };
+    });
 
     if (otherParts.length > 0) {
       rawMessages.push(
@@ -482,7 +562,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     return rawMessages.length === 1 ? rawMessages[0] : rawMessages;
   }
 
-  convertToRawMessage(msg: SessionMessage): ChatCompletionMessageParam | ChatCompletionMessageParam[] {
+  convertToRawMessage(msg: SessionMessage): ChatCompletionApiMessage | ChatCompletionApiMessage[] {
     const raw = (() => {
       switch (msg.role) {
         case 'assistant':
@@ -496,19 +576,35 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
       }
     })();
 
-    if (!this.dialectResolver) {
-      return raw;
-    }
+    const wrap = (inner: ChatCompletionMessageParam): ChatCompletionApiMessage => {
+      const wrapped: ChatCompletionApiMessage = {
+        messageId: msg.messageId,
+        type: 'chat_completion_api_message',
+        role:
+          inner.role === 'function'
+            ? 'tool'
+            : inner.role === 'developer' || inner.role === 'system' // actually, this shouldn't happen
+              ? 'user'
+              : inner.role,
+        content: inner,
+        metadata: msg.metadata,
+      };
+      return this.dialectResolver
+        ? this.dialectResolver.manipulateRawMessage(wrapped, msg)
+        : wrapped;
+    };
+
     if (Array.isArray(raw)) {
-      const manipulated = raw.map((rawMsg) => this.dialectResolver!.manipulateRawMessage(rawMsg, msg));
-      return manipulated.length === 1 ? manipulated[0] : manipulated;
+      const wrapped = raw.map(wrap);
+      return wrapped.length === 1 ? wrapped[0] : wrapped;
     }
-    return this.dialectResolver.manipulateRawMessage(raw, msg);
+    return wrap(raw);
   }
 
   private isOfficialService(): boolean {
-    const normalized =
-      ChatCompletionTransport.normalizeBaseUrl(this.configuredBaseUrl)?.toLowerCase();
+    const normalized = ChatCompletionTransport.normalizeBaseUrl(
+      this.configuredBaseUrl,
+    )?.toLowerCase();
     return !normalized || normalized === ChatCompletionTransport.OFFICIAL_BASE_URL;
   }
 
@@ -532,17 +628,26 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
   private buildModelResponse(
     response: ChatCompletion,
     responseMessage: ChatCompletionMessageParam,
-  ): ModelResponse<ChatCompletionMessageParam> {
+  ): ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>> {
+    const wrappedMessage: Omit<ChatCompletionApiMessage, 'messageId'> = {
+      type: 'chat_completion_api_message',
+      role: 'assistant',
+      content: responseMessage,
+      metadata: {
+        pixiagent_response_id: response.id,
+        pixiagent_response_finish_reason: response.choices[0]?.finish_reason,
+      },
+    };
     return {
       responseId: response.id,
-      responseMessage,
+      responseMessage: wrappedMessage,
       responseModel: response.model,
       stopReason:
         this.dialectResolver?.extractFromResponse('stop_reason', response) ??
         this.getStopReason(response.choices[0]?.finish_reason),
       refusal:
         responseMessage.role === 'assistant' && 'refusal' in responseMessage
-          ? (responseMessage.refusal ?? undefined)
+          ? ((responseMessage as ChatCompletionAssistantMessageParam).refusal ?? undefined)
           : undefined,
       usage: response.usage
         ? {
@@ -568,14 +673,14 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
               : undefined,
           }
         : undefined,
-    } as ModelResponse<ChatCompletionMessageParam>;
+    } as ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>;
   }
 
   private async generateWithOfficialStream(
     params: ChatCompletionStreamParams,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<ChatCompletionMessageParam>> {
+  ): Promise<ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>> {
     let textChunkStarted = false;
     let thinkingChunkStarted = false;
     let thinkingText = '';
@@ -654,7 +759,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
     params: ChatCompletionStreamParams,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<ChatCompletionMessageParam>> {
+  ): Promise<ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>> {
     let textChunkStarted = false;
     let thinkingChunkStarted = false;
     let thinkingText = '';
@@ -761,7 +866,10 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
       role: 'assistant',
       content: assistantText || null,
       refusal: refusalText || undefined,
-      tool_calls: toolCalls.size > 0 ? [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v) : undefined,
+      tool_calls:
+        toolCalls.size > 0
+          ? [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
+          : undefined,
       audio: null,
     };
 
@@ -786,10 +894,10 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
 
   async generate(
     options: ModelOptions,
-    messages: Array<ChatCompletionMessageParam>,
+    messages: Array<ChatCompletionApiMessage>,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<ChatCompletionMessageParam>> {
+  ): Promise<ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>> {
     const params = this.getChatCompletionStreamParams(options, messages);
     try {
       return this.isOfficialService()
@@ -877,7 +985,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
 
   private getChatCompletionStreamParams(
     options: ModelOptions,
-    messages: Array<ChatCompletionMessageParam>,
+    messages: Array<ChatCompletionApiMessage>,
   ): ChatCompletionStreamParams {
     const inputs: ChatCompletionMessageParam[] = [];
     if (options.systemPrompt) {
@@ -886,7 +994,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionMes
         content: options.systemPrompt,
       });
     }
-    inputs.push(...messages);
+    inputs.push(...messages.map((m) => m.content));
 
     const params: ChatCompletionStreamParams = {
       model: options.model,

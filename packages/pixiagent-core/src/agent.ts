@@ -63,7 +63,7 @@ export class PixiAgent {
    */
   public async execute(
     modelOptions: ModelOptions,
-    input: SessionMessage,
+    input: Omit<SessionMessage, 'messageId' | 'role'> & { messageId?: string; role: 'user' },
   ): Promise<PixiAgentExecutionResult> {
     modelOptions = PixiAgent.resolveApiModeAndBaseUrl(modelOptions);
     if (this.isRunning) {
@@ -71,14 +71,14 @@ export class PixiAgent {
     }
 
     this.isRunning = true;
-    const usage = PixiAgent.createEmptyUsageStats();
+    const usage = UsageStats.empty();
     let userMessageId: string | undefined = undefined;
     try {
       return await withSpan(
         'agent_execution',
         async () => {
           const transport = this.getTransport(modelOptions);
-          const requestInternalMsg = this.enqueueRequestMessage(transport, modelOptions, input);
+          const requestInternalMsg = this.enqueueRequestMessage(modelOptions, input);
           const historyMessages = this.getHistoryMessagesForTransport(modelOptions, transport);
           userMessageId = requestInternalMsg.internalMessageId;
           const stopReason = await this.runExecutionLoop(
@@ -94,7 +94,7 @@ export class PixiAgent {
 
           return {
             stopReason,
-            usage: PixiAgent.hasUsageData(usage) ? usage : undefined,
+            usage: UsageStats.isEmpty(usage) ? undefined : usage,
             userMessageId: userMessageId,
             metadata: this.getExecutionMetadata(),
           };
@@ -114,7 +114,7 @@ export class PixiAgent {
         return {
           stopReason: 'cancelled',
           userMessageId: userMessageId,
-          usage: PixiAgent.hasUsageData(usage) ? usage : undefined,
+          usage: UsageStats.isEmpty(usage) ? undefined : usage,
           metadata: this.getExecutionMetadata(),
         };
       }
@@ -174,22 +174,31 @@ export class PixiAgent {
             isExpectedError: (error) => this.isInterruptAbortError(error),
           },
         );
-        historyMessages.push(response.responseMessage);
 
-        const respSessionMsg = transport.convertFromRawMessage(response.responseMessage);
         const responseInternalMsg = this.sessionThread.addMessage(
-          respSessionMsg.role,
+          'assistant',
           response.responseMessage,
           modelOptions,
           response.usage,
           createdAt,
         );
+        const respSessionMsg = transport.convertFromRawMessage(
+          responseInternalMsg.rawMessage as RawMessageType,
+        );
+        historyMessages.push(responseInternalMsg.rawMessage as RawMessageType);
+
         this.logger.info(
           PixiAgent.getMessageLogData(modelOptions, respSessionMsg, responseInternalMsg, response),
           'Response from the LLM',
         );
         this.addResponseSpanAttributes(span, modelOptions, response, responseInternalMsg);
-        return response;
+        return {
+          ...response,
+          responseMessage: {
+            ...response.responseMessage,
+            messageId: responseInternalMsg.rawMessage.messageId,
+          } as RawMessageType,
+        } as ModelResponse<RawMessageType>;
       },
       {
         tracer: trace,
@@ -207,7 +216,7 @@ export class PixiAgent {
     const payload = this.getToolCallPayload(transport, historyMessages);
     if (!payload) return;
 
-    const { sessionMessage, toolCalls } = payload;
+    const { toolCalls } = payload;
     const isParallel = modelOptions.parallelToolCalls ?? true;
     const toolNames = toolCalls.map((tc) => tc.name);
     this.logger.debug({ toolNames, isParallel }, 'Tool calls start');
@@ -216,13 +225,7 @@ export class PixiAgent {
       'execute_tool_calls',
       async () => {
         const resultParts = await this.executeToolCalls(toolCalls, isParallel);
-        this.appendToolCallResults(
-          transport,
-          modelOptions,
-          historyMessages,
-          sessionMessage,
-          resultParts,
-        );
+        this.appendToolCallResults(transport, modelOptions, historyMessages, resultParts);
       },
       {
         tracer: trace,
@@ -247,17 +250,10 @@ export class PixiAgent {
   }
 
   private enqueueRequestMessage(
-    transport: ProviderTransport<RawMessageType>,
     modelOptions: ModelOptions,
-    input: SessionMessage,
+    input: Omit<SessionMessage, 'messageId'> & { messageId?: string },
   ): InternalMessage {
-    const converted = transport.convertToRawMessage(input);
-    const rawRequestMessage = this.getSingleRawMessage(converted, input.role, 'request');
-    const requestInternalMsg = this.sessionThread.addMessage(
-      input.role,
-      rawRequestMessage,
-      modelOptions,
-    );
+    const requestInternalMsg = this.sessionThread.addMessage(input.role, input, modelOptions);
     this.logger.info(
       PixiAgent.getMessageLogData(modelOptions, input, requestInternalMsg),
       'Request to the LLM',
@@ -289,7 +285,7 @@ export class PixiAgent {
         historyMessages,
         iterations,
       );
-      PixiAgent.accumulateUsage(usage, response.usage);
+      UsageStats.sum(usage, response.usage);
       iterations++;
 
       const stopReason = this.getLoopStopReason(response, modelOptions);
@@ -379,7 +375,7 @@ export class PixiAgent {
       return 'refusal';
     }
 
-    if (response.stopReason === 'cancelled') {
+    if (response.stopReason === 'cancelled' || response.stopReason === 'timeout') {
       return 'cancelled';
     }
 
@@ -406,61 +402,6 @@ export class PixiAgent {
     return metadata;
   }
 
-  private static createEmptyUsageStats(): UsageStats {
-    return {
-      inputTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-    };
-  }
-
-  private static hasUsageData(usage: UsageStats): boolean {
-    return (
-      usage.inputTokens > 0 ||
-      usage.outputTokens > 0 ||
-      usage.totalTokens > 0 ||
-      (usage.cacheReadTokens ?? 0) > 0 ||
-      (usage.cacheCreatedTokens ?? 0) > 0 ||
-      (usage.reasoningTokens ?? 0) > 0 ||
-      Object.keys(usage.inputTokenDetails ?? {}).length > 0 ||
-      Object.keys(usage.outputTokenDetails ?? {}).length > 0
-    );
-  }
-
-  private static accumulateUsage(usage: UsageStats, delta?: UsageStats): void {
-    if (!delta) return;
-    usage.inputTokens += delta.inputTokens;
-    usage.outputTokens += delta.outputTokens;
-    usage.totalTokens += delta.totalTokens;
-
-    if (delta.cacheReadTokens !== undefined) {
-      usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + delta.cacheReadTokens;
-    }
-    if (delta.cacheCreatedTokens !== undefined) {
-      usage.cacheCreatedTokens = (usage.cacheCreatedTokens ?? 0) + delta.cacheCreatedTokens;
-    }
-    if (delta.reasoningTokens !== undefined) {
-      usage.reasoningTokens = (usage.reasoningTokens ?? 0) + delta.reasoningTokens;
-    }
-
-    if (delta.inputTokenDetails) {
-      usage.inputTokenDetails = {
-        ...(usage.inputTokenDetails ?? {}),
-      };
-      for (const [key, value] of Object.entries(delta.inputTokenDetails)) {
-        usage.inputTokenDetails[key] = (usage.inputTokenDetails[key] ?? 0) + value;
-      }
-    }
-    if (delta.outputTokenDetails) {
-      usage.outputTokenDetails = {
-        ...(usage.outputTokenDetails ?? {}),
-      };
-      for (const [key, value] of Object.entries(delta.outputTokenDetails)) {
-        usage.outputTokenDetails[key] = (usage.outputTokenDetails[key] ?? 0) + value;
-      }
-    }
-  }
-
   private getRequestSpanAttributes(modelOptions: ModelOptions): Record<string, string | number> {
     const attrs: Record<string, string | number> = {
       'gen_ai.operation.name': 'chat',
@@ -485,7 +426,7 @@ export class PixiAgent {
   private addResponseSpanAttributes(
     span: AgentSpan,
     modelOptions: ModelOptions,
-    response: ModelResponse<RawMessageType>,
+    response: ModelResponse<Omit<RawMessageType, 'messageId'>>,
     responseInternalMsg: InternalMessage,
   ): void {
     span.setAttribute('agent.request.internal_id', responseInternalMsg.previousMessageId!);
@@ -590,29 +531,28 @@ export class PixiAgent {
     transport: ProviderTransport<RawMessageType>,
     modelOptions: ModelOptions,
     historyMessages: RawMessageType[],
-    sessionMessage: SessionMessage,
     resultParts: ToolResultPart[],
   ): void {
     const resultMsg = {
       type: 'session_message',
       role: 'tool',
-      name: sessionMessage.name,
       content: resultParts,
-    } as SessionMessage;
-    const rawResultMessages = this.toRawMessageArray(transport.convertToRawMessage(resultMsg));
-    historyMessages.push(...rawResultMessages);
+    } as Omit<SessionMessage, 'messageId'>;
 
-    for (const rawResultMsg of rawResultMessages) {
-      const resultInternalMsg = this.sessionThread.addMessage(
-        resultMsg.role,
-        rawResultMsg,
-        modelOptions,
-      );
-      this.logger.info(
-        PixiAgent.getMessageLogData(modelOptions, resultMsg, resultInternalMsg),
-        'Tool calls completed',
-      );
-    }
+    const resultInternalMsg = this.sessionThread.addMessage(
+      resultMsg.role,
+      resultMsg,
+      modelOptions,
+    );
+    const rawResultMessages = this.toRawMessageArray(
+      transport.convertToRawMessage(resultInternalMsg.rawMessage as SessionMessage),
+    );
+    historyMessages.push(...rawResultMessages);
+    this.convertedMessagesCache.set(resultInternalMsg.internalMessageId, rawResultMessages);
+    this.logger.info(
+      PixiAgent.getMessageLogData(modelOptions, resultMsg, resultInternalMsg),
+      'Tool calls completed',
+    );
   }
 
   private throwIfInterrupted(defaultReason: string): void {
@@ -674,7 +614,12 @@ export class PixiAgent {
   ): RawMessageType[] {
     const messages = [] as RawMessageType[];
     for (const msg of this.sessionThread.threadMessages) {
-      if (modelOptions.apiMode !== msg.apiMode || modelOptions.baseUrl !== msg.baseUrl) {
+      const isAssistantMessage = msg.role === 'assistant';
+      if (
+        modelOptions.apiMode !== msg.apiMode ||
+        modelOptions.baseUrl !== msg.baseUrl ||
+        !isAssistantMessage
+      ) {
         if (this.convertedMessagesCache.has(msg.internalMessageId)) {
           const cached = this.convertedMessagesCache.get(msg.internalMessageId)!;
           if (msg.role === 'tool') {
@@ -695,7 +640,9 @@ export class PixiAgent {
           });
           this.transportCache.set(tKey, t);
         }
-        const sessionMsg = t.convertFromRawMessage(msg.rawMessage);
+        const sessionMsg = isAssistantMessage
+          ? t.convertFromRawMessage(msg.rawMessage as RawMessageType)
+          : (msg.rawMessage as SessionMessage);
         const converted = transport.convertToRawMessage(sessionMsg);
         this.convertedMessagesCache.set(msg.internalMessageId, converted);
         if (msg.role === 'tool') {
@@ -704,7 +651,7 @@ export class PixiAgent {
           messages.push(this.getSingleRawMessage(converted, msg.role, 'history conversion'));
         }
       } else {
-        messages.push(msg.rawMessage);
+        messages.push(msg.rawMessage as RawMessageType);
       }
     }
     return messages;
@@ -746,25 +693,51 @@ export class PixiAgent {
    * @returns if any media source is expired, return false.
    */
   private ensureMediaValid(): boolean {
-    if (!this.sessionThread.session.mediaInfo) return true;
     const now = Date.now() + 1000 * 60 * 10; // 10 minutes buffer
-    const expiredMedias = this.sessionThread.session.mediaInfo.filter(
-      (media) => media.expireAt && media.expireAt <= now,
-    );
-    if (expiredMedias.length === 0) return true;
-    // the mediaInfo is session level (if it's thread level, need to be copied during the forking),
-    // so, when the event is raised, to update all the expired media sources in all messages or just
-    // the messages in the current thread, we leave it to the event handler to decide.
-    this.convertedMessagesCache.clear();
-    // todo: raise event to handle the expired media
-    return false;
+    for (const msg of this.sessionThread.threadMessages) {
+      if ((msg.rawMessage as SessionMessage)?.type === 'session_message') {
+        const sessionMsg = msg.rawMessage as SessionMessage;
+        if (!sessionMsg.content || typeof sessionMsg.content === 'string') continue;
+        for (const part of sessionMsg.content) {
+          const media = (() => {
+            switch (part.type) {
+              case 'image':
+                return part.image;
+              case 'document':
+                return part.document;
+              case 'audio':
+                return part.audio;
+              case 'video':
+                return part.video;
+              default:
+                return undefined;
+            }
+          })();
+          if (
+            media !== undefined &&
+            media.sourceType !== 'base64' &&
+            media?.expireAt &&
+            media.expireAt <= now
+          ) {
+            // the mediaInfo is session level (if it's thread level, need to be copied during the forking),
+            // so, when the event is raised, to update all the expired media sources in all messages or just
+            // the messages in the current thread, we leave it to the event handler to decide.
+
+            // todo: raise event to handle the expired media
+            this.convertedMessagesCache.clear();
+            return false;
+          }
+        }
+      }
+    }
+    return true;
   }
 
   private static getMessageLogData(
     modelOptions: ModelOptions,
-    sessionMessage: SessionMessage,
+    sessionMessage: Omit<SessionMessage, 'messageId'> & { messageId?: string },
     internalMessage: InternalMessage,
-    response?: ModelResponse<RawMessageType>,
+    response?: ModelResponse<Omit<RawMessageType, 'messageId'>>,
   ): Record<string, unknown> {
     const respData = response
       ? {
@@ -783,7 +756,6 @@ export class PixiAgent {
       prevInternalMessageId: internalMessage.previousMessageId,
       role: sessionMessage.role,
       name: sessionMessage.name,
-      refusal: sessionMessage.refusal,
       content: ContentPart.digest(sessionMessage.content),
       metadata: modelOptions.metadata,
     };

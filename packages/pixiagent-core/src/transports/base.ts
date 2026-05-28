@@ -50,7 +50,7 @@ export abstract class ProviderTransport<TRawMessage> {
     messages: TRawMessage[],
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<TRawMessage>>;
+  ): Promise<ModelResponse<Omit<TRawMessage, 'messageId'>>>;
 }
 
 export interface ModelRequestOptions {

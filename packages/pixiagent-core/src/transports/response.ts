@@ -1,7 +1,7 @@
 import { OpenAI } from 'openai/client';
 import type {
   Response,
-  ResponseCreateParamsNonStreaming,
+  ResponseCreateParamsStreaming,
   ResponseFunctionToolCall,
   ResponseInputItem,
   ResponseOutputMessage,
@@ -11,7 +11,6 @@ import type {
 import {
   ApiModes,
   ContentPart,
-  DocumentPart,
   ImagePart,
   RawDeltaMessageType,
   RawLLMParametersType,
@@ -21,6 +20,8 @@ import {
   TextPart,
   ToolCallPart,
   ToolResultPart,
+  ResponseApiMessage,
+  ThinkingPart,
 } from '../message';
 import {
   AgentInterruptedError,
@@ -37,7 +38,7 @@ import {
   StreamCallbacks,
 } from './base';
 
-export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
+export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
   readonly client: OpenAI;
   private static readonly OFFICIAL_BASE_URL = 'https://api.openai.com/v1';
   private readonly configuredBaseUrl?: string;
@@ -56,7 +57,7 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
     baseUrl?: string,
     apiKey?: string,
     dialectResolver?: DialectResolver<
-      ResponseInputItem,
+      ResponseApiMessage,
       RawDeltaMessageType,
       RawLLMParametersType,
       RawResponseType
@@ -70,175 +71,279 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
     });
   }
 
-  private createSyntheticId(prefix: string): string {
-    return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-  }
-
   private convertResponseInputContentItem(
-    content: ResponseInputItem.Message['content'][number] | ResponseOutputMessage['content'][number],
+    content:
+      | ResponseInputItem.Message['content'][number]
+      | ResponseOutputMessage['content'][number],
   ): ContentPart | undefined {
     if (content.type === 'input_text' || content.type === 'output_text') {
-      return {
-        type: 'text',
-        text: content.text,
-      } as TextPart;
+      return this.convertFromResponseTextContent(content.text);
     }
 
     if (content.type === 'refusal') {
-      return {
-        type: 'refusal',
-        reason: content.refusal,
-      } as RefusalPart;
+      return this.convertFromResponseRefusalContent(content.refusal);
     }
 
     if (content.type === 'input_image') {
-      if (content.image_url) {
-        return {
-          type: 'image',
-          image: {
-            sourceType: 'url',
-            url: content.image_url,
-          },
-        } as ImagePart;
-      }
-      if (content.file_id) {
-        return {
-          type: 'image',
-          image: {
-            sourceType: 'file_id',
-            fileId: content.file_id,
-          },
-        } as ImagePart;
-      }
-      return undefined;
-    }
-
-    if (content.type === 'input_file') {
-      if (content.file_url) {
-        return {
-          type: 'document',
-          document: {
-            sourceType: 'url',
-            url: content.file_url,
-          },
-        } as DocumentPart;
-      }
-      if (content.file_data) {
-        return {
-          type: 'document',
-          document: {
-            sourceType: 'base64',
-            data: content.file_data,
-            fileName: content.filename ?? '',
-          },
-        } as DocumentPart;
-      }
-      if (content.file_id) {
-        return {
-          type: 'document',
-          document: {
-            sourceType: 'file_id',
-            fileId: content.file_id,
-          },
-        } as DocumentPart;
-      }
-      return undefined;
+      return this.convertFromResponseImageContent(content);
     }
 
     return undefined;
   }
 
-  private getFromMessage(rawMsg: ResponseInputItem): SessionMessage {
-    if (rawMsg.type !== 'message') {
-      throw new InvalidMessageError(`Expected message item, received: ${rawMsg.type}`);
+  private convertResponseInputItemToParts(item: ResponseInputItem): ContentPart[] {
+    if (item.type === 'message') {
+      const contents = typeof item.content === 'string' ? [item.content] : item.content;
+      return contents
+        .map((content) =>
+          typeof content === 'string'
+            ? this.convertFromResponseTextContent(content)
+            : this.convertResponseInputContentItem(content),
+        )
+        .filter((part): part is ContentPart => part !== undefined);
     }
 
-    const parts: ContentPart[] = [];
-    if (typeof rawMsg.content === 'string') {
-      parts.push({
-        type: 'text',
-        text: rawMsg.content,
-      } as TextPart);
-    } else {
-      for (const content of rawMsg.content) {
-        const part = this.convertResponseInputContentItem(content);
-        if (part) {
-          parts.push(part);
-        }
-      }
-    }
-
-    const role = rawMsg.role === 'assistant' ? 'assistant' : 'user';
-    return {
-      type: 'session_message',
-      role,
-      content: parts,
-    } as SessionMessage;
-  }
-
-  private getFromFunctionCall(rawMsg: ResponseFunctionToolCall): SessionMessage {
-    return {
-      type: 'session_message',
-      role: 'assistant',
-      content: [
+    if (item.type === 'function_call') {
+      return [
         {
           type: 'tool_call',
-          id: rawMsg.call_id,
-          name: rawMsg.name,
-          arguments: rawMsg.arguments,
+          id: item.call_id,
+          name: item.name,
+          arguments: item.arguments,
         } as ToolCallPart,
-      ],
-    } as SessionMessage;
-  }
+      ];
+    }
 
-  private getFromFunctionCallOutput(rawMsg: ResponseInputItem.FunctionCallOutput): SessionMessage {
-    const result =
-      typeof rawMsg.output === 'string'
-        ? rawMsg.output
-        : JSON.stringify(
-            rawMsg.output.map((item) => {
-              if (item.type === 'input_text') {
-                return item.text;
-              }
-              if (item.type === 'input_image') {
-                return item.image_url ?? item.file_id ?? '';
-              }
-              return item.file_id ?? item.file_url ?? item.filename ?? '';
-            }),
-          );
+    if (
+      item.type === 'computer_call' ||
+      item.type === 'file_search_call' ||
+      item.type === 'custom_tool_call' ||
+      item.type === 'tool_search_call' ||
+      item.type === 'web_search_call' ||
+      item.type === 'code_interpreter_call' ||
+      item.type === 'image_generation_call' ||
+      item.type === 'local_shell_call' ||
+      item.type === 'shell_call' ||
+      item.type === 'apply_patch_call' ||
+      item.type === 'mcp_call' ||
+      item.type === 'mcp_list_tools' ||
+      item.type === 'mcp_approval_request' ||
+      item.type === 'mcp_approval_response'
+    ) {
+      const itemAny = item as { type: string; id?: string; custom?: { name?: string } };
+      const toolName =
+        item.type === 'custom_tool_call'
+          ? itemAny.custom?.name ?? item.type
+          : item.type;
+      const toolId =
+        itemAny.id && typeof itemAny.id === 'string'
+          ? itemAny.id
+          : `${item.type}:${Math.random().toString(36).slice(2, 10)}`;
+      return [
+        {
+          type: 'tool_call',
+          id: toolId,
+          name: toolName,
+          arguments: ContentPart.createProviderToolCallArguments('openai_response', item.type, item),
+        } as ToolCallPart,
+      ];
+    }
 
-    return {
-      type: 'session_message',
-      role: 'tool',
-      content: [
+    if (item.type === 'function_call_output') {
+      return [
         {
           type: 'tool_result',
-          id: rawMsg.call_id,
-          result,
+          id: item.call_id,
+          result: this.convertFunctionCallOutput(item.output),
         } as ToolResultPart,
-      ],
+      ];
+    }
+
+    if (item.type === 'reasoning') {
+      const content = item.summary?.map((s) => s.text).join('') ?? '';
+      if (!content) return [];
+      return [
+        {
+          type: 'thinking',
+          content,
+        } as ThinkingPart,
+      ];
+    }
+
+    return [];
+  }
+
+  private convertFunctionCallOutput(
+    output: ResponseInputItem.FunctionCallOutput['output'],
+  ): string | Array<TextPart | ImagePart> {
+    if (typeof output === 'string') {
+      return output;
+    }
+    return output
+      .map((item) => {
+        if (item.type === 'input_text') {
+          return { type: 'text', text: item.text } as TextPart;
+        }
+        if (item.type === 'input_image') {
+          if (item.image_url) {
+            return {
+              type: 'image',
+              image: { sourceType: 'url', url: item.image_url },
+            } as ImagePart;
+          }
+          if (item.file_id) {
+            return {
+              type: 'image',
+              image: { sourceType: 'file_id', fileId: item.file_id },
+            } as ImagePart;
+          }
+        }
+        return null;
+      })
+      .filter((part): part is TextPart | ImagePart => part !== null);
+  }
+
+  private convertFromResponseTextContent(text: string): TextPart {
+    return {
+      type: 'text',
+      text,
+    };
+  }
+
+  private convertFromResponseRefusalContent(reason: string): RefusalPart {
+    return {
+      type: 'refusal',
+      reason,
+    };
+  }
+
+  private convertFromResponseImageContent(
+    content: Extract<ResponseInputItem.Message['content'][number], { type: 'input_image' }>,
+  ): ImagePart | undefined {
+    if (content.image_url) {
+      return {
+        type: 'image',
+        image: {
+          sourceType: 'url',
+          url: content.image_url,
+        },
+      };
+    }
+    if (content.file_id) {
+      return {
+        type: 'image',
+        image: {
+          sourceType: 'file_id',
+          fileId: content.file_id,
+        },
+      };
+    }
+    return undefined;
+  }
+
+  private convertToResponseInputTextContent(part: TextPart): ResponseInputItem.Message['content'][number] {
+    return { type: 'input_text', text: part.text };
+  }
+
+  private convertToResponseInputImageContent(
+    part: ImagePart,
+  ): ResponseInputItem.Message['content'][number] | undefined {
+    if (part.image.sourceType === 'url') {
+      return { type: 'input_image', detail: 'auto', image_url: part.image.url };
+    }
+    if (part.image.sourceType === 'base64') {
+      return {
+        type: 'input_image',
+        detail: 'auto',
+        image_url: `data:${part.image.mimeType};base64,${part.image.data}`,
+      };
+    }
+    if (part.image.sourceType === 'file_id') {
+      return { type: 'input_image', detail: 'auto', file_id: part.image.fileId };
+    }
+    return undefined;
+  }
+
+  private convertToResponseInputContentPart(
+    part: ContentPart,
+  ): ResponseInputItem.Message['content'][number] | undefined {
+    if (part.type === 'text') {
+      return this.convertToResponseInputTextContent(part as TextPart);
+    }
+    if (part.type === 'image') {
+      return this.convertToResponseInputImageContent(part as ImagePart);
+    }
+    return undefined;
+  }
+
+  private convertToResponseOutputTextContent(
+    part: TextPart,
+  ): ResponseOutputMessage['content'][number] {
+    return {
+      type: 'output_text',
+      text: part.text,
+      annotations: [],
+    };
+  }
+
+  private convertToResponseOutputRefusalContent(
+    part: RefusalPart,
+  ): ResponseOutputMessage['content'][number] {
+    return {
+      type: 'refusal',
+      refusal: part.reason,
+    };
+  }
+
+  // private convertThinkingPartToResponseReasoningItem(
+  //   part: ThinkingPart,
+  // ): ResponseReasoningItem {
+  //   return {
+  //     type: 'reasoning',
+  //     id: this.createSyntheticId('reasoning'),
+  //     summary: [],
+  //     content: [{ type: 'reasoning_text', text: part.content }],
+  //     encrypted_content: part.signature,
+  //   };
+  // }
+
+  private convertToResponseOutputContentPart(
+    part: ContentPart,
+  ): ResponseOutputMessage['content'][number] | null {
+    if (part.type === 'text') {
+      return this.convertToResponseOutputTextContent(part as TextPart);
+    }
+    if (part.type === 'refusal') {
+      return this.convertToResponseOutputRefusalContent(part as RefusalPart);
+    }
+    return null;
+  }
+
+  private convertToResponseFunctionCallOutput(
+    toolResult: ToolResultPart,
+  ): ResponseInputItem.FunctionCallOutput {
+    return {
+      type: 'function_call_output',
+      call_id: toolResult.id,
+      output: toolResult.result,
+      status: 'completed',
+    } as ResponseInputItem.FunctionCallOutput;
+  }
+
+  private getFromMessage(rawMsg: ResponseApiMessage): SessionMessage {
+    const parts = rawMsg.content.flatMap((item) => this.convertResponseInputItemToParts(item));
+    
+    return {
+      messageId: rawMsg.messageId,
+      type: 'session_message',
+      role: rawMsg.role,
+      content: parts.length === 0 ? '(message contains unsupported content)' : parts,
+      metadata: rawMsg.metadata,
     } as SessionMessage;
   }
 
-  convertFromRawMessage(rawMsg: ResponseInputItem): SessionMessage {
-    const message = (() => {
-      if (rawMsg.type === 'function_call') {
-        return this.getFromFunctionCall(rawMsg);
-      }
-      if (rawMsg.type === 'function_call_output') {
-        return this.getFromFunctionCallOutput(rawMsg);
-      }
-      if (rawMsg.type === 'message' || (!('type' in rawMsg) && 'role' in rawMsg)) {
-        if (rawMsg.role === 'system' || rawMsg.role === 'developer') {
-          throw new InvalidMessageError(
-            'System/developer role messages must be provided via instructions, not message items.',
-          );
-        }
-        return this.getFromMessage(rawMsg as ResponseInputItem.Message);
-      }
-      throw new InvalidMessageError(`Unsupported response input item type: ${rawMsg.type}`);
-    })();
-
+  convertFromRawMessage(rawMsg: ResponseApiMessage): SessionMessage {
+    const message = this.getFromMessage(rawMsg);
     return this.dialectResolver ? this.dialectResolver.manipulateMessage(message, rawMsg) : message;
   }
 
@@ -257,39 +362,16 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
 
     const content = [] as ResponseInputItem.Message['content'];
     for (const part of msg.content) {
-      if (part.type === 'text') {
-        content.push({ type: 'input_text', text: (part as TextPart).text });
-      } else if (part.type === 'image') {
-        const image = (part as ImagePart).image;
-        if (image.sourceType === 'url') {
-          content.push({ type: 'input_image', detail: 'auto', image_url: image.url });
-        } else if (image.sourceType === 'base64') {
-          content.push({
-            type: 'input_image',
-            detail: 'auto',
-            image_url: `data:${image.mimeType};base64,${image.data}`,
-          });
-        } else {
-          content.push({ type: 'input_image', detail: 'auto', file_id: image.fileId });
-        }
-      } else if (part.type === 'document') {
-        const doc = (part as DocumentPart).document;
-        if (doc.sourceType === 'url') {
-          content.push({ type: 'input_file', file_url: doc.url });
-        } else if (doc.sourceType === 'base64') {
-          content.push({
-            type: 'input_file',
-            file_data: doc.data,
-            filename: doc.fileName,
-          });
-        } else {
-          content.push({ type: 'input_file', file_id: doc.fileId });
-        }
+      const converted = this.convertToResponseInputContentPart(part);
+      if (converted) {
+        content.push(converted);
       }
     }
 
     if (content.length === 0) {
-      throw new InvalidMessageError('User message must include at least one supported content part');
+      throw new InvalidMessageError(
+        'User message must include at least one supported content part',
+      );
     }
 
     return {
@@ -299,56 +381,54 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
     };
   }
 
-  private getAssistantMessage(msg: SessionMessage): ResponseInputItem {
-    if (msg.content instanceof Array) {
-      const toolCalls = msg.content
-        .filter((part) => part.type === 'tool_call')
-        .map((part) => part as ToolCallPart);
-
-      if (toolCalls.length > 0) {
-        const toolCall = toolCalls[0];
-        return {
-          type: 'function_call',
-          id: this.createSyntheticId('fc'),
-          call_id: toolCall.id,
-          name: toolCall.name,
-          arguments: toolCall.arguments,
-          status: 'completed',
-        };
-      }
-
-      const messageContent = msg.content
-        .filter((part) => part.type === 'text' || part.type === 'refusal')
-        .map((part) => {
-          if (part.type === 'text') {
-            return {
-              type: 'output_text',
-              text: (part as TextPart).text,
-              annotations: [],
-            };
-          }
-          return {
-            type: 'refusal',
-            refusal: (part as RefusalPart).reason,
-          };
-        });
-
+  private getAssistantMessage(
+    msg: SessionMessage,
+  ): ResponseInputItem | ResponseOutputMessage | Array<ResponseInputItem | ResponseOutputMessage> {
+    if (!(msg.content instanceof Array)) {
       return {
         type: 'message',
-        id: this.createSyntheticId('msg'),
+        id: msg.messageId,
         role: 'assistant',
         status: 'completed',
-        content: messageContent,
+        content: [{ type: 'output_text', text: msg.content ?? '', annotations: [] }],
       } as ResponseOutputMessage;
     }
 
-    return {
-      type: 'message',
-      id: this.createSyntheticId('msg'),
-      role: 'assistant',
-      status: 'completed',
-      content: [{ type: 'output_text', text: msg.content ?? '', annotations: [] }],
-    } as ResponseOutputMessage;
+    const items: Array<ResponseInputItem | ResponseOutputMessage> = [];
+
+    // ignore the reasoning data. It may useless to get it from the message generated by other LLM.
+    // const reasoningParts = msg.content.filter((part) => part.type === 'thinking') as ThinkingPart[];
+    // reasoningParts.forEach((part) => items.push(this.convertThinkingPartToResponseReasoningItem(part)));
+
+    const toolCalls = msg.content
+      .filter((part) => part.type === 'tool_call')
+      .map((part) => part as ToolCallPart);
+    for (const toolCall of toolCalls) {
+      items.push({
+        type: 'function_call',
+        id: `${msg.messageId}_${toolCall.id}`,
+        call_id: toolCall.id,
+        name: toolCall.name,
+        arguments: toolCall.arguments,
+        status: 'completed',
+      } as ResponseFunctionToolCall);
+    }
+
+    const messageContent = msg.content
+      .map((part) => this.convertToResponseOutputContentPart(part))
+      .filter((item): item is ResponseOutputMessage['content'][number] => item !== null);
+
+    if (messageContent.length > 0) {
+      items.push({
+        type: 'message',
+        id: msg.messageId,
+        role: 'assistant',
+        status: 'completed',
+        content: messageContent,
+      } as ResponseOutputMessage);
+    }
+
+    return items.length === 1 ? items[0] : items;
   }
 
   private getToolMessage(msg: SessionMessage): ResponseInputItem | ResponseInputItem[] {
@@ -363,14 +443,8 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
       throw new InvalidMessageError('Tool message must include at least one tool_result part');
     }
 
-    const rawMessages: ResponseInputItem[] = toolResults.map(
-      (toolResult) =>
-        ({
-          type: 'function_call_output',
-          call_id: toolResult.id,
-          output: toolResult.result,
-          status: 'completed',
-        }) as ResponseInputItem.FunctionCallOutput,
+    const rawMessages: ResponseInputItem[] = toolResults.map((toolResult) =>
+      this.convertToResponseFunctionCallOutput(toolResult),
     );
 
     const otherParts = msg.content.filter((part) => part.type !== 'tool_result');
@@ -387,31 +461,38 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
     return rawMessages.length === 1 ? rawMessages[0] : rawMessages;
   }
 
-  convertToRawMessage(msg: SessionMessage): ResponseInputItem | ResponseInputItem[] {
-    const raw = (() => {
+  convertToRawMessage(msg: SessionMessage): ResponseApiMessage {
+    const rawItems = (() => {
       switch (msg.role) {
         case 'assistant':
-          return this.getAssistantMessage(msg);
+          return [this.getAssistantMessage(msg)];
         case 'user':
-          return this.getUserMessage(msg);
-        case 'tool':
-          return this.getToolMessage(msg);
+          return [this.getUserMessage(msg)];
+        case 'tool': {
+          const toolRaw = this.getToolMessage(msg);
+          return Array.isArray(toolRaw) ? toolRaw : [toolRaw];
+        }
         default:
           throw new InvalidMessageError(`Unsupported message role: ${msg.role}`);
       }
     })();
 
-    if (!this.dialectResolver) {
-      return raw;
-    }
-    if (Array.isArray(raw)) {
-      const manipulated = raw.map((rawMsg) => this.dialectResolver!.manipulateRawMessage(rawMsg, msg));
-      return manipulated.length === 1 ? manipulated[0] : manipulated;
-    }
-    return this.dialectResolver.manipulateRawMessage(raw, msg);
+    const responseApiMessage: ResponseApiMessage = {
+      messageId: msg.messageId,
+      type: 'response_api_message',
+      role: msg.role,
+      content: rawItems.flat(),
+      metadata: msg.metadata,
+    };
+
+    return this.dialectResolver
+      ? this.dialectResolver.manipulateRawMessage(responseApiMessage, msg)
+      : responseApiMessage;
   }
 
-  private getToolChoice(options: ModelOptions): ToolChoiceOptions | 'required' | 'none' | undefined {
+  private getToolChoice(
+    options: ModelOptions,
+  ): ToolChoiceOptions | 'required' | 'none' | undefined {
     if (!options.tools || options.tools.length === 0) {
       return undefined;
     }
@@ -426,13 +507,9 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
     }
   }
 
-  private getReasoningEffort(thinkEffort?: ModelOptions['thinkEffort']):
-    | 'none'
-    | 'low'
-    | 'medium'
-    | 'high'
-    | 'xhigh'
-    | undefined {
+  private getReasoningEffort(
+    thinkEffort?: ModelOptions['thinkEffort'],
+  ): 'none' | 'low' | 'medium' | 'high' | 'xhigh' | undefined {
     switch (thinkEffort) {
       case 'disable':
         return 'none';
@@ -481,45 +558,65 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
     return 'stop';
   }
 
-  private getResponseMessage(response: Response): ResponseInputItem {
-    const functionCall = response.output.find((item) => item.type === 'function_call');
-    if (functionCall && functionCall.type === 'function_call') {
-      return functionCall;
+  private getResponseMessage(response: Response): Omit<ResponseApiMessage, 'messageId'> {
+    const supportedOutputItems: ResponseInputItem[] = [];
+    for (const item of response.output) {
+      if (item.type === 'function_call' || item.type === 'message' || item.type === 'reasoning') {
+        supportedOutputItems.push(item as ResponseInputItem);
+      }
     }
 
-    const outputMessage = response.output.find((item) => item.type === 'message');
-    if (outputMessage && outputMessage.type === 'message') {
-      return outputMessage;
+    const metadata: Record<string, unknown> = { 
+      pixiagent_response_id: response.id,
+      pixiagent_response_error: response.error,
+      pixiagent_response_incomplete_details: response.incomplete_details,
+      pixiagent_response_status: response.status,
+    };
+
+    if (supportedOutputItems.length > 0) {
+      return {
+        type: 'response_api_message',
+        role: 'assistant',
+        content: supportedOutputItems,
+        metadata,
+      };
     }
 
     return {
-      type: 'message',
-      id: this.createSyntheticId('msg'),
+      type: 'response_api_message',
       role: 'assistant',
-      status: 'completed',
-      content: [{ type: 'output_text', text: response.output_text ?? '', annotations: [] }],
-    } as ResponseOutputMessage;
+      content: [
+        {
+          type: 'message',
+          id: response.id,
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: response.output_text ?? '', annotations: [] }],
+        } as ResponseOutputMessage,
+      ],
+      metadata,
+    };
   }
 
-  private getRefusal(responseMessage: ResponseInputItem): string | undefined {
-    if (responseMessage.type !== 'message') {
-      return undefined;
+  private getRefusal(responseMessage: Omit<ResponseApiMessage, 'messageId'>): string | undefined {
+    for (const item of responseMessage.content) {
+      if (item.type === 'message' && item.role === 'assistant' && Array.isArray(item.content)) {
+        const refusal = item.content.find((content) => content.type === 'refusal');
+        if (refusal?.type === 'refusal') {
+          return refusal.refusal;
+        }
+      }
     }
-    if (!Array.isArray(responseMessage.content)) {
-      return undefined;
-    }
-
-    const refusal = responseMessage.content.find((item) => item.type === 'refusal');
-    return refusal?.type === 'refusal' ? refusal.refusal : undefined;
+    return undefined;
   }
 
   private buildParams(
     options: ModelOptions,
-    messages: Array<ResponseInputItem>,
-  ): ResponseCreateParamsNonStreaming {
-    const params: ResponseCreateParamsNonStreaming = {
+    messages: Array<ResponseApiMessage>,
+  ): ResponseCreateParamsStreaming {
+    const params: ResponseCreateParamsStreaming = {
       model: options.model,
-      input: messages,
+      input: messages.flatMap((message) => message.content),
       instructions: options.systemPrompt,
       max_output_tokens: options.maxTokens,
       temperature: options.temperature,
@@ -527,9 +624,11 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
       parallel_tool_calls: options.parallelToolCalls,
       tool_choice: this.getToolChoice(options),
       store: false,
-      reasoning: {
+      stream: true,
+      reasoning: options.thinkEffort ? {
         effort: this.getReasoningEffort(options.thinkEffort),
-      },
+        summary: 'auto',
+      } : undefined,
       text: options.outputSchema
         ? {
             format: {
@@ -575,10 +674,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
   }
 
   private async generateWithOfficialStream(
-    params: ResponseCreateParamsNonStreaming,
+    params: ResponseCreateParamsStreaming,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<ResponseInputItem>> {
+  ): Promise<ModelResponse<Omit<ResponseApiMessage, 'messageId'>>> {
     let textChunkStarted = false;
     let textBuffer = '';
     let sawTextDelta = false;
@@ -599,7 +698,7 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
 
     let response: Response | undefined;
     const stream = this.client.responses
-      .stream({ ...params, stream: true }, this.getStreamRequestOptions(requestOptions))
+      .stream(params, this.getStreamRequestOptions(requestOptions))
       .on('response.reasoning_text.delta', (event) => {
         sawThinkingDelta = true;
         thinkingBuffer += event.delta;
@@ -724,10 +823,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
   }
 
   private async generateWithThirdPartyCreate(
-    params: ResponseCreateParamsNonStreaming,
+    params: ResponseCreateParamsStreaming,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<ResponseInputItem>> {
+  ): Promise<ModelResponse<Omit<ResponseApiMessage, 'messageId'>>> {
     let textChunkStarted = false;
     let textBuffer = '';
     let sawTextDelta = false;
@@ -761,7 +860,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
 
       switch (type) {
         case 'response.reasoning_text.delta': {
-          const deltaEvent = event as Extract<ResponseStreamEvent, { type: 'response.reasoning_text.delta' }>;
+          const deltaEvent = event as Extract<
+            ResponseStreamEvent,
+            { type: 'response.reasoning_text.delta' }
+          >;
           sawThinkingDelta = true;
           thinkingBuffer += deltaEvent.delta;
           if (!thinkingChunkStarted) {
@@ -773,7 +875,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
           break;
         }
         case 'response.reasoning_summary_text.delta': {
-          const deltaEvent = event as Extract<ResponseStreamEvent, { type: 'response.reasoning_summary_text.delta' }>;
+          const deltaEvent = event as Extract<
+            ResponseStreamEvent,
+            { type: 'response.reasoning_summary_text.delta' }
+          >;
           sawThinkingDelta = true;
           thinkingBuffer += deltaEvent.delta;
           if (!thinkingChunkStarted) {
@@ -785,7 +890,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
           break;
         }
         case 'response.reasoning_text.done': {
-          const doneEvent = event as Extract<ResponseStreamEvent, { type: 'response.reasoning_text.done' }>;
+          const doneEvent = event as Extract<
+            ResponseStreamEvent,
+            { type: 'response.reasoning_text.done' }
+          >;
           if (!sawThinkingDelta && doneEvent.text) {
             thinkingBuffer += doneEvent.text;
             if (!thinkingChunkStarted) {
@@ -798,7 +906,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
           break;
         }
         case 'response.reasoning_summary_text.done': {
-          const doneEvent = event as Extract<ResponseStreamEvent, { type: 'response.reasoning_summary_text.done' }>;
+          const doneEvent = event as Extract<
+            ResponseStreamEvent,
+            { type: 'response.reasoning_summary_text.done' }
+          >;
           if (!sawThinkingDelta && doneEvent.text) {
             thinkingBuffer += doneEvent.text;
             if (!thinkingChunkStarted) {
@@ -811,7 +922,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
           break;
         }
         case 'response.output_text.delta': {
-          const deltaEvent = event as Extract<ResponseStreamEvent, { type: 'response.output_text.delta' }>;
+          const deltaEvent = event as Extract<
+            ResponseStreamEvent,
+            { type: 'response.output_text.delta' }
+          >;
           closeThinkingChunk();
           sawTextDelta = true;
           textBuffer += deltaEvent.delta;
@@ -824,7 +938,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
           break;
         }
         case 'response.output_text.done': {
-          const doneEvent = event as Extract<ResponseStreamEvent, { type: 'response.output_text.done' }>;
+          const doneEvent = event as Extract<
+            ResponseStreamEvent,
+            { type: 'response.output_text.done' }
+          >;
           closeThinkingChunk();
           if (!sawTextDelta && !textChunkStarted) {
             textChunkStarted = true;
@@ -838,7 +955,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
           break;
         }
         case 'response.function_call_arguments.done': {
-          const toolEvent = event as Extract<ResponseStreamEvent, { type: 'response.function_call_arguments.done' }>;
+          const toolEvent = event as Extract<
+            ResponseStreamEvent,
+            { type: 'response.function_call_arguments.done' }
+          >;
           callbacks?.onToolUse?.(toolEvent.name, toolEvent.arguments);
           break;
         }
@@ -903,10 +1023,10 @@ export class ResponseTransport extends ProviderTransport<ResponseInputItem> {
 
   async generate(
     options: ModelOptions,
-    messages: Array<ResponseInputItem>,
+    messages: Array<ResponseApiMessage>,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<ResponseInputItem>> {
+  ): Promise<ModelResponse<Omit<ResponseApiMessage, 'messageId'>>> {
     const params = this.buildParams(options, messages);
 
     try {

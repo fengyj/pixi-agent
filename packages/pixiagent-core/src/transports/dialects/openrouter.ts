@@ -8,16 +8,22 @@ import type {
 import type {
   Response,
   ResponseCreateParams,
-  ResponseInputItem,
   ResponseStreamEvent,
 } from 'openai/resources/responses/responses';
 import type {
   Message,
-  MessageParam,
   MessageStreamParams,
   RawContentBlockDelta,
 } from '@anthropic-ai/sdk/resources/messages/messages';
-import { ApiModes, SessionMessage, ThinkingPart, ContentPart } from '../../message';
+import {
+  ApiModes,
+  AnthropicApiMessage,
+  ChatCompletionApiMessage,
+  ResponseApiMessage,
+  SessionMessage,
+  ThinkingPart,
+  ContentPart,
+} from '../../message';
 import { ApiModeResolver, DialectResolver, ModelOptions } from '../base';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
@@ -58,7 +64,7 @@ export class OpenRouterApiModeResolver extends ApiModeResolver {
  * outside the original provider context, so there is nothing useful to preserve.
  */
 export class OpenRouterChatDialectResolver implements DialectResolver<
-  ChatCompletionMessageParam,
+  ChatCompletionApiMessage,
   ChatCompletionChunk.Choice.Delta,
   ChatCompletionStreamParams,
   ChatCompletion
@@ -95,9 +101,9 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
   }
 
   manipulateRawMessage(
-    rawMsg: ChatCompletionMessageParam,
+    rawMsg: ChatCompletionApiMessage,
     msg?: SessionMessage,
-  ): ChatCompletionMessageParam {
+  ): ChatCompletionApiMessage {
     if (rawMsg.role !== 'assistant' || !(msg?.content instanceof Array)) return rawMsg;
 
     const thinkingParts = msg.content.filter((p): p is ThinkingPart => p.type === 'thinking');
@@ -113,18 +119,31 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
         text: p.content,
         signature: p.signature ?? null,
       }));
-      return { ...rawMsg, reasoning_details: reasoningDetails } as ChatCompletionMessageParam;
+      return {
+        ...rawMsg,
+        content: {
+          ...rawMsg.content,
+          reasoning_details: reasoningDetails,
+        } as unknown as ChatCompletionMessageParam,
+      };
     }
 
     // Plain text thinking — use the simpler `reasoning` string field.
     const reasoningText = thinkingParts.map((p) => p.content).join('');
-    return { ...rawMsg, reasoning: reasoningText } as ChatCompletionMessageParam;
+    return {
+      ...rawMsg,
+      content: {
+        ...rawMsg.content,
+        reasoning: reasoningText,
+      } as unknown as ChatCompletionMessageParam,
+    };
   }
 
-  manipulateMessage(msg: SessionMessage, rawMsg: ChatCompletionMessageParam): SessionMessage {
-    if (rawMsg.role !== 'assistant') return msg;
+  manipulateMessage(msg: SessionMessage, rawMsg: ChatCompletionApiMessage): SessionMessage {
+    const inner = rawMsg.content;
+    if (inner.role !== 'assistant') return msg;
 
-    const raw = rawMsg as ChatCompletionAssistantMessageParam & {
+    const raw = inner as ChatCompletionAssistantMessageParam & {
       reasoning?: string;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       reasoning_details?: any[];
@@ -190,9 +209,8 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
     response: ChatCompletion,
   ): number | undefined {
     if (data === 'cache_created_tokens') {
-      return (
-        response.usage?.prompt_tokens_details as { cache_write_tokens?: number } | undefined
-      )?.cache_write_tokens;
+      return (response.usage?.prompt_tokens_details as { cache_write_tokens?: number } | undefined)
+        ?.cache_write_tokens;
     }
     return undefined;
   }
@@ -205,7 +223,7 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
  * the shape pass-through and only applies OpenRouter-specific option normalization.
  */
 export class OpenRouterResponseDialectResolver implements DialectResolver<
-  ResponseInputItem,
+  ResponseApiMessage,
   ResponseStreamEvent,
   ResponseCreateParams,
   Response
@@ -238,11 +256,11 @@ export class OpenRouterResponseDialectResolver implements DialectResolver<
     };
   }
 
-  manipulateRawMessage(rawMsg: ResponseInputItem, _msg?: SessionMessage): ResponseInputItem {
+  manipulateRawMessage(rawMsg: ResponseApiMessage, _msg?: SessionMessage): ResponseApiMessage {
     return rawMsg;
   }
 
-  manipulateMessage(msg: SessionMessage, _rawMsg: ResponseInputItem): SessionMessage {
+  manipulateMessage(msg: SessionMessage, _rawMsg: ResponseApiMessage): SessionMessage {
     return msg;
   }
 
@@ -265,7 +283,7 @@ export class OpenRouterResponseDialectResolver implements DialectResolver<
  * keep a light pass-through dialect hook for transport unification.
  */
 export class OpenRouterAnthropicDialectResolver implements DialectResolver<
-  MessageParam,
+  AnthropicApiMessage,
   RawContentBlockDelta,
   MessageStreamParams,
   Message
@@ -278,11 +296,11 @@ export class OpenRouterAnthropicDialectResolver implements DialectResolver<
     return parameters;
   }
 
-  manipulateRawMessage(rawMsg: MessageParam, _msg?: SessionMessage): MessageParam {
+  manipulateRawMessage(rawMsg: AnthropicApiMessage, _msg?: SessionMessage): AnthropicApiMessage {
     return rawMsg;
   }
 
-  manipulateMessage(msg: SessionMessage, _rawMsg: MessageParam): SessionMessage {
+  manipulateMessage(msg: SessionMessage, _rawMsg: AnthropicApiMessage): SessionMessage {
     return msg;
   }
 

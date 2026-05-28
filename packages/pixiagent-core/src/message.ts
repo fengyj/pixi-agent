@@ -21,6 +21,9 @@ export enum ApiModes {
   BEDROCK = 'bedrock', // maybe this should be a dialect
 }
 
+const RoleTypeSchema = z.enum(['assistant', 'user', 'tool']);
+export type RoleType = z.infer<typeof RoleTypeSchema>;
+
 export interface UsageStats {
   inputTokens: number;
   outputTokens: number;
@@ -85,6 +88,20 @@ export const UsageStats = {
       outputTokenDetails: mergeTokenDetails(a.outputTokenDetails, b.outputTokenDetails),
     };
   },
+  isEmpty: (usage: UsageStats): boolean => {
+    return (
+      usage.inputTokens === 0 &&
+      usage.outputTokens === 0 &&
+      usage.totalTokens === 0 &&
+      (usage.cacheReadTokens ?? 0) === 0 &&
+      (usage.cacheCreatedTokens ?? 0) === 0 &&
+      (usage.reasoningTokens ?? 0) === 0 &&
+      (usage.inputTokenDetails === undefined ||
+        Object.values(usage.inputTokenDetails).every((v) => v === 0)) &&
+      (usage.outputTokenDetails === undefined ||
+        Object.values(usage.outputTokenDetails).every((v) => v === 0))
+    );
+  },
 };
 
 /**
@@ -99,7 +116,7 @@ export const UsageStats = {
  * @todo for the source which type is 'file_id', handle the case when the file is expired
  * or the provider is changed, needs to reupload the file, and replace the fileId in all references in the whole history.
  */
-export const MediaSourceSchema = z.union([
+const MediaSourceSchema = z.union([
   z.object({
     sourceType: z.literal('base64'),
     /**
@@ -108,29 +125,113 @@ export const MediaSourceSchema = z.union([
      */
     mimeType: z.string(),
     data: z.string(),
+    /**
+     * The file name of the media, which is optional.
+     * It can be used to indicate the original file name of the media.
+     */
     fileName: z.string().optional(),
+    /**
+     * The URI of the media, which is optional.
+     * It can be used to indicate the location of the media.
+     */
+    uri: z.string().optional(),
   }),
   z.object({
     sourceType: z.literal('url'),
     url: z.string(),
+    /**
+     * The file name of the media, which is optional.
+     * It can be used to indicate the original file name of the media.
+     */
+    fileName: z.string().optional(),
+    expireAt: z.number().optional(),
+    /**
+     * The URI of the media, which is optional.
+     * It can be used to indicate the original location of the media.
+     */
+    uri: z.string().optional(),
   }),
   z.object({
     sourceType: z.literal('file_id'),
     fileId: z.string(),
-    expireAt: z.date().optional(),
+    expireAt: z.number().optional(),
+    /**
+     * The file name of the media, which is optional.
+     * It can be used to indicate the original file name of the media.
+     */
+    fileName: z.string().optional(),
+    /**
+     * The URI of the media, which is optional.
+     * It can be used to indicate the original location of the media.
+     */
+    uri: z.string().optional(),
   }),
 ]);
 
 export type MediaSource = z.infer<typeof MediaSourceSchema>;
 
-export const TextPartSchema = z.object({
+const CitationWebLocationSchema = z.object({
+  url: z.string(),
+  type: z.literal('web_location'),
+  citedText: z.string(),
+  title: z.string().optional(),
+  startIndex: z.number().optional(),
+  endIndex: z.number().optional(),
+  /** For the fields not very common in the original citation/annotation data */
+  extra: z.record(z.string(), z.unknown()).optional(),
+});
+
+export type CitationWebLocation = z.infer<typeof CitationWebLocationSchema>;
+
+const CitationFileLocationSchema = z.object({
+  fileName: z.string(),
+  type: z.literal('file_location'),
+  citedText: z.string(),
+  title: z.string().optional(),
+  /** can be start_page_number/start_block_index/start_index/etc. */
+  startIndex: z.number().optional(),
+  /** can be end_page_number/end_block_index/end_index/etc. */
+  endIndex: z.number().optional(),
+  /** Used for identifying the citation/annotation type from the raw message */
+  rawCitationType: z.string(),
+  /** For the fields not very common in the original citation/annotation data */
+  extra: z.record(z.string(), z.unknown()).optional(),
+});
+
+export type CitationFileLocation = z.infer<typeof CitationFileLocationSchema>;
+
+const CitationOthersLocationSchema = z.object({
+  source: z.string(),
+  type: z.literal('others_location'),
+  citedText: z.string(),
+  title: z.string().optional(),
+  startIndex: z.number().optional(),
+  endIndex: z.number().optional(),
+  /** Used for identifying the citation/annotation type from the raw message */
+  rawCitationType: z.string(),
+  /** For the fields not very common in the original citation/annotation data */
+  extra: z.record(z.string(), z.unknown()).optional(),
+});
+
+export type CitationOthersLocation = z.infer<typeof CitationOthersLocationSchema>;
+
+const CitationSchema = z.union([
+  CitationWebLocationSchema,
+  CitationFileLocationSchema,
+  CitationOthersLocationSchema,
+]);
+
+export type Citation = z.infer<typeof CitationSchema>;
+
+const TextPartSchema = z.object({
   type: z.literal('text'),
   text: z.string(),
+  citations: z.array(CitationSchema).optional(),
 });
 
 export type TextPart = z.infer<typeof TextPartSchema>;
 
-export const ThinkingPartSchema = z.object({
+const ThinkingPartSchema = z.object({
   type: z.literal('thinking'),
   content: z.string(),
   signature: z.string().optional(),
@@ -138,42 +239,42 @@ export const ThinkingPartSchema = z.object({
 
 export type ThinkingPart = z.infer<typeof ThinkingPartSchema>;
 
-export const RefusalPartSchema = z.object({
+const RefusalPartSchema = z.object({
   type: z.literal('refusal'),
   reason: z.string(),
 });
 
 export type RefusalPart = z.infer<typeof RefusalPartSchema>;
 
-export const ImagePartSchema = z.object({
+const ImagePartSchema = z.object({
   type: z.literal('image'),
   image: MediaSourceSchema,
 });
 
 export type ImagePart = z.infer<typeof ImagePartSchema>;
 
-export const DocumentPartSchema = z.object({
+const DocumentPartSchema = z.object({
   type: z.literal('document'),
   document: MediaSourceSchema,
 });
 
 export type DocumentPart = z.infer<typeof DocumentPartSchema>;
 
-export const AudioPartSchema = z.object({
+const AudioPartSchema = z.object({
   type: z.literal('audio'),
   audio: MediaSourceSchema,
 });
 
 export type AudioPart = z.infer<typeof AudioPartSchema>;
 
-export const VideoPartSchema = z.object({
+const VideoPartSchema = z.object({
   type: z.literal('video'),
   video: MediaSourceSchema,
 });
 
 export type VideoPart = z.infer<typeof VideoPartSchema>;
 
-export const ToolCallPartSchema = z.object({
+const ToolCallPartSchema = z.object({
   type: z.literal('tool_call'),
   id: z.string(),
   name: z.string(),
@@ -188,7 +289,7 @@ export const ToolCallPartSchema = z.object({
 
 export type ToolCallPart = z.infer<typeof ToolCallPartSchema>;
 
-export const ToolResultPartSchema = z.object({
+const ToolResultPartSchema = z.object({
   type: z.literal('tool_result'),
   id: z.string(),
   name: z.string().optional(),
@@ -196,13 +297,24 @@ export const ToolResultPartSchema = z.object({
    * The JSON string of the result.
    * The Anthropic supports the image as the result of the tool call.
    */
-  result: z.string(),
+  result: z.union([
+    z.string(),
+    z.array(
+      z.union([
+        TextPartSchema,
+        ImagePartSchema,
+        DocumentPartSchema,
+        AudioPartSchema,
+        VideoPartSchema,
+      ]),
+    ),
+  ]),
   isError: z.boolean().optional(),
 });
 
 export type ToolResultPart = z.infer<typeof ToolResultPartSchema>;
 
-export const ContentPartSchema = z.union([
+const ContentPartSchema = z.union([
   TextPartSchema,
   ThinkingPartSchema,
   RefusalPartSchema,
@@ -283,10 +395,19 @@ function getContentDigest(
   return digestValue(content) as string | Array<ContentPart>;
 }
 
+function createProviderToolCallArguments(
+  provider: string,
+  rawType: string,
+  rawRequest: unknown,
+): string {
+  return JSON.stringify({ provider, rawType, rawRequest });
+}
+
 export const ContentPart = {
   toParts: toContentParts,
   concat: concatContentParts,
   digest: getContentDigest,
+  createProviderToolCallArguments: createProviderToolCallArguments,
 };
 
 /**
@@ -294,16 +415,49 @@ export const ContentPart = {
  * between the different API modes or dialects.
  */
 export const SessionMessageSchema = z.object({
+  messageId: z.string(),
   type: z.literal('session_message'),
-  role: z.enum(['assistant', 'user', 'tool']),
-  content: z.union([z.string(), z.array(ContentPartSchema)]).optional(),
-  refusal: z.string().optional(),
+  role: RoleTypeSchema,
+  content: z.union([z.string(), z.array(ContentPartSchema)]),
+  /**
+   * The name of the role, which is optional.
+   * It can be used to indicate the name of the assistant or user.
+   */
   name: z.string().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type SessionMessage = z.infer<typeof SessionMessageSchema>;
 
-export type RawMessageType = ChatCompletionMessageParam | ResponseInputItem | MessageParam;
+/**
+ * The message in the OpenAI's response API, is quite different from the others.
+ * It isn't message based. So, have to define a type for it.
+ */
+export type ResponseApiMessage = {
+  messageId: string;
+  type: 'response_api_message';
+  role: RoleType;
+  content: Array<ResponseInputItem>;
+  metadata?: Record<string, unknown>;
+};
+
+export type ChatCompletionApiMessage = {
+  messageId: string;
+  type: 'chat_completion_api_message';
+  role: RoleType;
+  content: ChatCompletionMessageParam;
+  metadata?: Record<string, unknown>;
+};
+
+export type AnthropicApiMessage = {
+  messageId: string;
+  type: 'anthropic_api_message';
+  role: RoleType;
+  content: MessageParam;
+  metadata?: Record<string, unknown>;
+};
+
+export type RawMessageType = ChatCompletionApiMessage | ResponseApiMessage | AnthropicApiMessage;
 
 export type RawDeltaMessageType =
   | ChatCompletionChunk.Choice.Delta
@@ -355,6 +509,10 @@ export interface InternalMessage {
    * This allows us to keep the original message format for each API mode,
    * while still being able to use them interchangeably in the conversation.
    *
+   * For the user input and tool messages, use the SessionMessage format, because
+   * the format may contain the information or data that is not supported by the API,
+   * to avoid those information or data being lost, so we use the SessionMessage format here.
+   *
    * When converting to other message formats, here are somethings need to be considered:
    * - The Anthropic message could contain text and tool calls at the same time,
    *   and OpenAI's usually doesn't.
@@ -383,8 +541,11 @@ export interface InternalMessage {
    * - Qwen
    *   - reasoning_content: the thinking mode only can be triggered when the content is simple text, not array.
    */
-  rawMessage: RawMessageType;
-  role: 'assistant' | 'user' | 'tool';
+  rawMessage: RawMessageType | SessionMessage;
+  /**
+   * The role of the message, which can be 'assistant', 'user', or 'tool'.
+   */
+  role: RoleType;
   /**
    * The message happened before this one. Excepts the first message, others should have this value.
    */

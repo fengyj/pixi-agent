@@ -5,14 +5,14 @@ module.exports = {
     ecmaVersion: 2020,
     sourceType: 'module'
   },
-  plugins: ['@typescript-eslint', 'import'],
-  extends: ['eslint:recommended', 'plugin:@typescript-eslint/recommended', 'plugin:import/recommended', 'prettier'],
+  plugins: ['@typescript-eslint', 'import-x'],
+  extends: ['eslint:recommended', 'plugin:@typescript-eslint/recommended', 'plugin:import-x/recommended', 'prettier'],
   env: {
     node: true,
     es2020: true,
     jest: true
   },
   rules: {
-    'import/no-unresolved': 'off'
+    'import-x/no-unresolved': 'off'
   }
 };

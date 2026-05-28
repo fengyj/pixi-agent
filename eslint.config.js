@@ -19,7 +19,7 @@ module.exports = [
     extends: [
       "eslint:recommended",
       "plugin:@typescript-eslint/recommended",
-      "plugin:import/recommended",
+      "plugin:import-x/recommended",
       "prettier",
     ],
     parser: "@typescript-eslint/parser",
@@ -35,7 +35,7 @@ module.exports = [
       es2020: true,
     },
     rules: {
-      "import/no-unresolved": "off",
+      "import-x/no-unresolved": "off",
       "@typescript-eslint/no-unused-vars": [
         "error",
         {
