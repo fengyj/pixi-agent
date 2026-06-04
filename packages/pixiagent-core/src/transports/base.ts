@@ -228,7 +228,7 @@ export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters, TRawR
    * @param data the name of the data field.
    * @param delta the raw delta.
    * @param streamDataExtractor the extracted data will be handled by streamDataExtractor
-   *                            to put the delta data to the accumulatedData. 
+   *                            to put the delta data to the accumulatedData.
    *                            And if the callbacks parameter is provided,
    *                            emit the chunk data via the callbacks.
    */
@@ -364,18 +364,19 @@ export class StreamDataExtractor<T extends Record<string, unknown>> {
   }
 
   /**
-   * 
+   *
    * @param delta the key is used for merging existing block. when it's absent, means no merging.
    * @param append define how to append the new block to the accumulated object.
-   * @param merge define how to merge the new delta with the existing block when the key is the same. 
+   * @param merge define how to merge the new delta with the existing block when the key is the same.
    *              if it's null, means no merging, just append as a new block (the key of the delta has to be undefined).
-   * @param toContentPart define how to convert the delta data to a ContentPart.
+   * @param toContentPart define how to convert the delta data to a ContentPart. 
+   *                      If the result is null, the chunk won't be emitted via the callbacks.
    */
   async accumulate<P>(
     delta: { key?: string; value: P },
     append: (accumulated: T, newData: P) => void,
     merge: ((existing: P, newData: P, accumulated?: T) => void) | null,
-    toContentPart: (data: P) => ContentPart,
+    toContentPart: (data: P) => ContentPart | null,
   ): Promise<void> {
     const key = delta.key ?? this.blocks.size.toString();
     const value = delta.value;
@@ -391,10 +392,15 @@ export class StreamDataExtractor<T extends Record<string, unknown>> {
       merge(block.data as P, value, this.accumulatedData);
       block.chunkIndex = block.chunkIndex + 1;
     }
-    await this.callBacks?.onChunk({
-      contentPartIndex: block.contentPartIndex,
-      contentPartChunk: toContentPart(value),
-      chunkIndex: block.chunkIndex,
-    });
+    if (this.callBacks) {
+      const contentPart = toContentPart(value);
+      if (contentPart) {
+        await this.callBacks.onChunk({
+          contentPartIndex: block.contentPartIndex,
+          contentPartChunk: contentPart,
+          chunkIndex: block.chunkIndex,
+        });
+      }
+    }
   }
 }

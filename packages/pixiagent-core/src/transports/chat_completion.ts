@@ -854,7 +854,12 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
               accumulated.choices[0].message.content.push(newData);
             },
             null,
-            (newData) => ({ type: 'text', text: newData.text }),
+            (newData) => {
+              if (!newData.text || newData.text.length === 0) {
+                return null;
+              }
+              return { type: 'text', text: newData.text };
+            },
           );
         }
         if (choice.delta.refusal && choice.delta.refusal.length > 0) {
@@ -872,7 +877,12 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
               accumulated.choices[0].message.content.push(newData);
             },
             null,
-            (newData) => ({ type: 'refusal', reason: newData.refusal }),
+            (newData) => {
+              if (!newData.refusal || newData.refusal.length === 0) {
+                return null;
+              }
+              return { type: 'refusal', reason: newData.refusal };
+            },
           );
         }
         if (choice.delta.tool_calls) {
@@ -893,8 +903,8 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
                 accumulated.choices[0].message.tool_calls.push(newData);
               },
               (existing, newData) => {
-                existing.id += newData.id ?? '';
-                existing.function.name += newData.function?.name ?? '';
+                existing.id = existing.id || newData.id || '';
+                existing.function.name = existing.function.name || newData.function?.name || '';
                 existing.function.arguments += newData.function?.arguments ?? '';
               },
               (newData) => ({

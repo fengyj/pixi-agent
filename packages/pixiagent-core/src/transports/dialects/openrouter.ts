@@ -231,7 +231,13 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
                 existing.signature = `${existing.signature ?? ''}${newData.signature ?? ''}`;
               }
             },
-            (data) => ({ type: 'thinking' as const, content: data.summary ?? (!data.signature || data.signature === '' ? data.text ?? '' : '') }),
+            (data) => {
+              const content = data.summary || data.text || '';
+              if (!content || content.length === 0) {
+                return null;
+              }
+              return { type: 'thinking' as const, content: content, signature: data.signature };
+            },
           );
         }
       } else if (
@@ -254,7 +260,12 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
             (message as Record<string, unknown> & { [key: string]: string })[propName] += newData;
           },
           null,
-          (data) => ({ type: 'thinking' as const, content: data }),
+          (data) => {
+            if (!data || data.length === 0) {
+              return null;
+            }
+            return { type: 'thinking' as const, content: data };
+          },
         );
       }
     }

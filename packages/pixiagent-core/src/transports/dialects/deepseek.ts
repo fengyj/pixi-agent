@@ -144,11 +144,16 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
         await streamDataExtractor.accumulate(
           { key: 'reasoning_content', value: delta.reasoning_content },
           reasoningUpdater,
-          (_existing: string, newData: string, accumulated?: T) => {
+          (_existing, newData, accumulated) => {
             if (!accumulated) return;
             reasoningUpdater(accumulated, newData);
           },
-          (data) => ({ type: 'thinking' as const, content: data }),
+          (data) => {
+            if (!data || data.length === 0) {
+              return null;
+            }
+            return { type: 'thinking' as const, content: data }
+          },
         );
       }
     }
