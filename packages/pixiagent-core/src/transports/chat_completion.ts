@@ -5,6 +5,7 @@ import {
   ModelResponse,
   ProviderTransport,
   StreamCallbacks,
+  StreamDataExtractor,
 } from './base';
 import type {
   ChatCompletionUserMessageParam,
@@ -18,6 +19,7 @@ import type {
   ChatCompletionContentPartInputAudio,
   ChatCompletionContentPart,
   ChatCompletionFunctionMessageParam,
+  ChatCompletionMessage,
   ChatCompletionStreamParams,
   ChatCompletionChunk,
   ChatCompletionReasoningEffort,
@@ -35,6 +37,7 @@ import {
   DocumentPart,
   ToolResultPart,
   ContentPart,
+  CitationWebLocation,
 } from '../message';
 import {
   AgentInterruptedError,
@@ -127,12 +130,24 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
             typeof (toolCall as { custom?: { name?: string } }).custom?.name === 'string'
               ? (toolCall as { custom: { name: string } }).custom.name
               : toolCall.id,
-          arguments: ContentPart.createProviderToolCallArguments('openai_chat', toolCall.type, toolCall),
+          arguments: ContentPart.createProviderToolCallArguments(
+            'openai_chat',
+            toolCall.type,
+            toolCall,
+          ),
         } as ToolCallPart);
       });
     }
+    const annotations = this.convertChatCompletionAnnotationsToCitations(
+      (
+        msg as ChatCompletionAssistantMessageParam & {
+          annotations?: Array<ChatCompletionMessage.Annotation>;
+        }
+      ).annotations,
+    );
+
     if (typeof msg.content === 'string') {
-      if (parts.length === 0) {
+      if (parts.length === 0 && annotations.length === 0) {
         return {
           messageId: rawMsg.messageId,
           type: 'session_message',
@@ -141,12 +156,12 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
           name: msg.name,
           metadata: rawMsg.metadata,
         } as SessionMessage;
-      } else {
-        parts.push({
-          type: 'text',
-          text: msg.content,
-        } as TextPart);
       }
+      parts.push({
+        type: 'text',
+        text: msg.content,
+        citations: annotations.length > 0 ? annotations : undefined,
+      } as TextPart);
     } else if (msg.content instanceof Array) {
       msg.content.forEach((contentPart) => {
         if (contentPart.type === 'text') {
@@ -155,6 +170,9 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
           parts.push(this.convertFromChatCompletionRefusalPart(contentPart));
         }
       });
+      if (annotations.length > 0) {
+        this.attachCitationsToTextParts(parts, annotations);
+      }
     }
 
     return {
@@ -227,7 +245,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
             id: msg.tool_call_id,
             result: contentPart.text,
           } as ToolResultPart);
-        } 
+        }
       });
     }
 
@@ -260,6 +278,84 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
 
   private convertFromChatCompletionTextPart(part: ChatCompletionContentPartText): TextPart {
     return { type: 'text', text: part.text };
+  }
+
+  private convertChatCompletionAnnotationsToCitations(
+    annotations?: Array<ChatCompletionMessage.Annotation>,
+  ): Array<CitationWebLocation> {
+    if (!annotations || annotations.length === 0) {
+      return [];
+    }
+
+    return annotations
+      .filter(
+        (annotation): annotation is ChatCompletionMessage.Annotation =>
+          annotation.type === 'url_citation',
+      )
+      .map((annotation) => ({
+        type: 'web_location',
+        url: annotation.url_citation.url,
+        citedText: '',
+        title: annotation.url_citation.title,
+        startIndex: annotation.url_citation.start_index,
+        endIndex: annotation.url_citation.end_index,
+        extra: { rawCitationType: 'url_citation' },
+      }));
+  }
+
+  private attachCitationsToTextParts(
+    parts: ContentPart[],
+    citations: Array<CitationWebLocation>,
+  ): ContentPart[] {
+    if (citations.length === 0) {
+      return parts;
+    }
+
+    const firstText = parts.find((part) => part.type === 'text') as TextPart | undefined;
+    if (firstText) {
+      firstText.citations = [...(firstText.citations ?? []), ...citations];
+      return parts;
+    }
+
+    return [
+      {
+        type: 'text',
+        text: '',
+        citations,
+      } as TextPart,
+      ...parts,
+    ];
+  }
+
+  private convertCitationToChatCompletionAnnotation(
+    citation: CitationWebLocation,
+  ): ChatCompletionMessage.Annotation {
+    return {
+      type: 'url_citation',
+      url_citation: {
+        url: citation.url,
+        title: citation.title ?? '',
+        start_index: citation.startIndex ?? 0,
+        end_index: citation.endIndex ?? 0,
+      },
+    };
+  }
+
+  private getChatCompletionAnnotationsFromSessionMessage(
+    msg: SessionMessage,
+  ): Array<ChatCompletionMessage.Annotation> {
+    if (!Array.isArray(msg.content)) {
+      return [];
+    }
+
+    return msg.content.flatMap((part) => {
+      if (part.type !== 'text' || !part.citations) {
+        return [];
+      }
+      return part.citations
+        .filter((citation): citation is CitationWebLocation => citation.type === 'web_location')
+        .map((citation) => this.convertCitationToChatCompletionAnnotation(citation));
+    });
   }
 
   private convertFromChatCompletionRefusalPart(
@@ -459,21 +555,26 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
                 part !== null,
             )
         : (msg.content ?? null);
-        
+
     let messageLevelRefusal: string | undefined = undefined;
     if (content instanceof Array && content.length === 1 && content[0].type === 'refusal') {
       messageLevelRefusal = content[0].refusal;
     }
 
+    const annotations = this.getChatCompletionAnnotationsFromSessionMessage(msg);
+
     return {
       role: 'assistant',
       content:
-        (messageLevelRefusal || (content instanceof Array && content.length === 0)) ? null : content,
+        messageLevelRefusal || (content instanceof Array && content.length === 0) ? null : content,
       tool_calls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
       audio: null, // todo: may need to handle this in the future.
       name: msg.name,
       refusal: messageLevelRefusal,
-    } as ChatCompletionAssistantMessageParam;
+      ...(annotations.length > 0 ? { annotations } : {}),
+    } as ChatCompletionAssistantMessageParam & {
+      annotations?: Array<ChatCompletionMessage.Annotation>;
+    };
   }
 
   private getUserMessageParam(msg: SessionMessage): ChatCompletionUserMessageParam {
@@ -528,25 +629,38 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
     }
 
     const rawMessages: ChatCompletionMessageParam[] = toolResults.map((toolResult) => {
-      const content =
-        typeof toolResult.result === 'string'
-          ? toolResult.result
-          : toolResult.result.map((part) => {
-              if (part.type === 'text') {
-                return this.convertToChatCompletionTextPart(part as TextPart);
-              } else {
-                return this.convertToChatCompletionTextPart({
-                  type: 'text',
-                  text: JSON.stringify(part),
-                } as TextPart);
-              }
-            });
-
-      return {
-        role: 'tool',
-        tool_call_id: toolResult.id,
-        content,
-      };
+      try {
+        const resultObj = JSON.parse(toolResult.result ?? '{}');
+        if (
+          Array.isArray(resultObj) &&
+          resultObj.every(
+            (item) =>
+              typeof item === 'object' &&
+              'type' in item &&
+              item.type === 'text' &&
+              'text' in item &&
+              typeof item.text === 'string',
+          )
+        ) {
+          return {
+            role: 'tool',
+            tool_call_id: toolResult.id,
+            content: resultObj.map((item) => ({ type: 'text', text: item.text })),
+          };
+        } else {
+          return {
+            role: 'tool',
+            tool_call_id: toolResult.id,
+            content: toolResult.result ?? JSON.stringify(null),
+          };
+        }
+      } catch {
+        return {
+          role: 'tool',
+          tool_call_id: toolResult.id,
+          content: toolResult.result ?? JSON.stringify(null),
+        };
+      }
     });
 
     if (otherParts.length > 0) {
@@ -601,13 +715,6 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
     return wrap(raw);
   }
 
-  private isOfficialService(): boolean {
-    const normalized = ChatCompletionTransport.normalizeBaseUrl(
-      this.configuredBaseUrl,
-    )?.toLowerCase();
-    return !normalized || normalized === ChatCompletionTransport.OFFICIAL_BASE_URL;
-  }
-
   private getStreamRequestOptions(requestOptions?: ModelRequestOptions): {
     signal?: AbortSignal;
     timeout?: number;
@@ -627,8 +734,8 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
 
   private buildModelResponse(
     response: ChatCompletion,
-    responseMessage: ChatCompletionMessageParam,
   ): ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>> {
+    const responseMessage = response.choices[0]?.message;
     const wrappedMessage: Omit<ChatCompletionApiMessage, 'messageId'> = {
       type: 'chat_completion_api_message',
       role: 'assistant',
@@ -676,222 +783,6 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
     } as ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>;
   }
 
-  private async generateWithOfficialStream(
-    params: ChatCompletionStreamParams,
-    callbacks?: StreamCallbacks,
-    requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>> {
-    let textChunkStarted = false;
-    let thinkingChunkStarted = false;
-    let thinkingText = '';
-
-    const response = await this.client.chat.completions
-      .stream(params, this.getStreamRequestOptions(requestOptions))
-      .on('chunk', (chunk) => {
-        const choice = chunk.choices[0];
-        if (!choice) return;
-
-        const delta = choice.delta;
-
-        const reasoningDelta: string | null | undefined = this.dialectResolver?.extractFromDelta(
-          'reasoning',
-          delta,
-        );
-        if (reasoningDelta) {
-          thinkingText += reasoningDelta;
-          if (!thinkingChunkStarted) {
-            thinkingChunkStarted = true;
-            callbacks?.onThinkingChunk?.(reasoningDelta, 'begin');
-          } else {
-            callbacks?.onThinkingChunk?.(reasoningDelta);
-          }
-        }
-
-        const textDelta: string | null | undefined = delta.content;
-        if (textDelta) {
-          if (thinkingChunkStarted) {
-            thinkingChunkStarted = false;
-            callbacks?.onThinkingChunk?.('', 'end');
-            callbacks?.onThinking?.(thinkingText);
-          }
-
-          if (!textChunkStarted) {
-            textChunkStarted = true;
-            callbacks?.onTextChunk?.(textDelta, 'begin');
-          } else {
-            callbacks?.onTextChunk?.(textDelta);
-          }
-        }
-
-        if (choice.finish_reason) {
-          if (textChunkStarted) {
-            textChunkStarted = false;
-            callbacks?.onTextChunk?.('', 'end');
-          }
-          if (thinkingChunkStarted) {
-            thinkingChunkStarted = false;
-            callbacks?.onThinkingChunk?.('', 'end');
-            callbacks?.onThinking?.(thinkingText);
-          }
-        }
-      })
-      .on('content', (content) => {
-        callbacks?.onText?.(content);
-      })
-      .on('finalFunctionToolCall', (toolCall) => {
-        callbacks?.onToolUse?.(toolCall.name, toolCall.arguments);
-      })
-      .on('error', (error) => {
-        callbacks?.onError?.(error);
-      })
-      .on('abort', (error) => {
-        callbacks?.onError?.(error);
-      })
-      .finalChatCompletion();
-
-    return this.buildModelResponse(
-      response,
-      response.choices[0].message as ChatCompletionMessageParam,
-    );
-  }
-
-  private async generateWithThirdPartyCreate(
-    params: ChatCompletionStreamParams,
-    callbacks?: StreamCallbacks,
-    requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>> {
-    let textChunkStarted = false;
-    let thinkingChunkStarted = false;
-    let thinkingText = '';
-    let finalFinishReason: string | undefined;
-    let responseId = '';
-    let responseModel = params.model;
-    let responseUsage: ChatCompletion['usage'] | undefined;
-    let refusalText = '';
-    let assistantText = '';
-    const toolCalls = new Map<number, ChatCompletionMessageFunctionToolCall>();
-
-    const stream = await this.client.chat.completions.create(
-      { ...params, stream: true },
-      this.getStreamRequestOptions(requestOptions),
-    );
-
-    for await (const chunk of stream) {
-      responseId = chunk.id;
-      responseModel = chunk.model;
-      responseUsage = chunk.usage ?? responseUsage;
-
-      const choice = chunk.choices[0];
-      if (!choice) continue;
-
-      const delta = choice.delta;
-
-      const reasoningDelta: string | null | undefined = this.dialectResolver?.extractFromDelta(
-        'reasoning',
-        delta,
-      );
-      if (reasoningDelta) {
-        thinkingText += reasoningDelta;
-        if (!thinkingChunkStarted) {
-          thinkingChunkStarted = true;
-          callbacks?.onThinkingChunk?.(reasoningDelta, 'begin');
-        } else {
-          callbacks?.onThinkingChunk?.(reasoningDelta);
-        }
-      }
-
-      if (delta.content) {
-        if (thinkingChunkStarted) {
-          thinkingChunkStarted = false;
-          callbacks?.onThinkingChunk?.('', 'end');
-          callbacks?.onThinking?.(thinkingText);
-        }
-        assistantText += delta.content;
-        if (!textChunkStarted) {
-          textChunkStarted = true;
-          callbacks?.onTextChunk?.(delta.content, 'begin');
-        } else {
-          callbacks?.onTextChunk?.(delta.content);
-        }
-      }
-
-      if (delta.refusal) {
-        refusalText += delta.refusal;
-      }
-
-      if (delta.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          const idx = tc.index ?? 0;
-          const existing =
-            toolCalls.get(idx) ??
-            ({
-              type: 'function',
-              id: tc.id ?? '',
-              function: {
-                name: tc.function?.name ?? '',
-                arguments: tc.function?.arguments ?? '',
-              },
-            } as ChatCompletionMessageFunctionToolCall);
-
-          if (tc.id) {
-            existing.id = tc.id;
-          }
-          if (tc.function?.name) {
-            existing.function.name = tc.function.name;
-          }
-          if (tc.function?.arguments) {
-            existing.function.arguments += tc.function.arguments;
-          }
-          toolCalls.set(idx, existing);
-        }
-      }
-
-      if (choice.finish_reason) {
-        finalFinishReason = choice.finish_reason;
-      }
-    }
-
-    if (textChunkStarted) {
-      callbacks?.onTextChunk?.('', 'end');
-    }
-    if (thinkingChunkStarted) {
-      callbacks?.onThinkingChunk?.('', 'end');
-      callbacks?.onThinking?.(thinkingText);
-    }
-    if (assistantText) {
-      callbacks?.onText?.(assistantText);
-    }
-
-    const message: ChatCompletionAssistantMessageParam = {
-      role: 'assistant',
-      content: assistantText || null,
-      refusal: refusalText || undefined,
-      tool_calls:
-        toolCalls.size > 0
-          ? [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
-          : undefined,
-      audio: null,
-    };
-
-    const syntheticResponse = {
-      id: responseId || `chatcmpl_${Date.now().toString(36)}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: responseModel,
-      choices: [
-        {
-          index: 0,
-          finish_reason: finalFinishReason ?? 'stop',
-          logprobs: null,
-          message,
-        },
-      ],
-      usage: responseUsage,
-    } as unknown as ChatCompletion;
-
-    return this.buildModelResponse(syntheticResponse, message);
-  }
-
   async generate(
     options: ModelOptions,
     messages: Array<ChatCompletionApiMessage>,
@@ -900,9 +791,128 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
   ): Promise<ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>> {
     const params = this.getChatCompletionStreamParams(options, messages);
     try {
-      return this.isOfficialService()
-        ? await this.generateWithOfficialStream(params, callbacks, requestOptions)
-        : await this.generateWithThirdPartyCreate(params, callbacks, requestOptions);
+      const stream = await this.client.chat.completions.create(
+        { ...params, stream: true },
+        this.getStreamRequestOptions(requestOptions),
+      );
+      const streamDataExtractor = new StreamDataExtractor(
+        {
+          id: '',
+          model: undefined as ChatCompletion['model'] | undefined,
+          created: Date.now() / 1000,
+          usage: undefined as ChatCompletion['usage'] | undefined,
+          choices: [{
+            index: 0,
+            finish_reason: 'stop' as ChatCompletion.Choice['finish_reason'],
+            logprobs: null,
+            message: {
+              role: 'assistant',
+              content: null as Array<ChatCompletionContentPartText | ChatCompletionContentPartRefusal> | null,
+              tool_calls: undefined as Array<ChatCompletionMessageFunctionToolCall> | undefined,
+              audio: null,
+            },
+          }],
+        },
+        callbacks,
+      );
+
+      for await (const chunk of stream) {
+        if (chunk.choices.length === 0) continue;
+        if (chunk.usage) {
+          streamDataExtractor.accumulatedData.usage = chunk.usage;
+        }
+        if (chunk.id) {
+          streamDataExtractor.accumulatedData.id = chunk.id;
+        }
+        streamDataExtractor.accumulatedData.model = chunk.model;
+        streamDataExtractor.accumulatedData.created = chunk.created;
+        if (chunk.choices.length > 1) {
+          continue; // Not support multiple choices.
+        }
+        const choice = chunk.choices[0];
+        if (choice.finish_reason) {
+          streamDataExtractor.accumulatedData.choices[0].finish_reason = choice.finish_reason;
+        }
+
+        if(this.dialectResolver) {
+          await this.dialectResolver.extractFromDelta(
+            'reasoning',
+            choice.delta,
+            streamDataExtractor
+          );
+        }
+
+        if (choice.delta.content && choice.delta.content.length > 0) {
+          await streamDataExtractor.accumulate(
+            {
+              value: { type: 'text', text: choice.delta.content } as ChatCompletionContentPartText,
+            },
+            (accumulated, newData) => {
+              if(accumulated.choices[0].message.content === null) {
+                accumulated.choices[0].message.content = [];
+              }
+              accumulated.choices[0].message.content.push(newData);
+            },
+            null,
+            (newData) => ({ type: 'text', text: newData.text }),
+          );
+        }
+        if (choice.delta.refusal && choice.delta.refusal.length > 0) {
+          await streamDataExtractor.accumulate(
+            {
+              value: {
+                type: 'refusal',
+                refusal: choice.delta.refusal,
+              } as ChatCompletionContentPartRefusal,
+            },
+            (accumulated, newData) => {
+              if (accumulated.choices[0].message.content === null) {
+                accumulated.choices[0].message.content = [];
+              }
+              accumulated.choices[0].message.content.push(newData);
+            },
+            null,
+            (newData) => ({ type: 'refusal', reason: newData.refusal }),
+          );
+        }
+        if (choice.delta.tool_calls) {
+          for (const tc of choice.delta.tool_calls) {
+            await streamDataExtractor.accumulate(
+              {
+                key: `tool_call_${tc.index}`,
+                value: {
+                  type: 'function',
+                  id: tc.id ?? '',
+                  function: tc.function ?? { name: '', arguments: '' },
+                } as ChatCompletionMessageFunctionToolCall,
+              },
+              (accumulated, newData) => {
+                if (accumulated.choices[0].message.tool_calls === undefined) {
+                  accumulated.choices[0].message.tool_calls = [];
+                }
+                accumulated.choices[0].message.tool_calls.push(newData);
+              },
+              (existing, newData) => {
+                existing.id += newData.id ?? '';
+                existing.function.name += newData.function?.name ?? '';
+                existing.function.arguments += newData.function?.arguments ?? '';
+              },
+              (newData) => ({
+                type: 'tool_call',
+                id: newData.id ?? '',
+                name: newData.function?.name ?? '',
+                arguments: newData.function?.arguments ?? '',
+              }),
+            );
+          }
+        }
+      }
+      const response = {
+        ...streamDataExtractor.accumulatedData,
+        object: 'chat.completion',
+      } as ChatCompletion;
+
+      return this.buildModelResponse(response);
     } catch (error) {
       throw this.wrapRequestError(error, requestOptions);
     }

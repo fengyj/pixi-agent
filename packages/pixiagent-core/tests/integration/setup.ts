@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterAll } from 'vitest';
 import { getIntegrationConfig } from './config';
-import { Observation } from '../../src/observation';
+import { Observation } from '../../src';
 const { setupObservability, shutdownObservability } = Observation;
 
 function parseEnvFile(content: string): Record<string, string> {

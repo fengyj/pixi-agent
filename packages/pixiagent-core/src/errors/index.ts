@@ -1,9 +1,10 @@
 export {
   PixiAgentError,
-  MaxIterationsExceededError,
-  AgentInterruptedError,
   PixiAgentRetriableError,
   PixiAgentTimeoutError,
+  MaxIterationsExceededError,
+  AgentInterruptedError,
+  AgentConcurrentExecutionError,
   ModelRequestTimeoutError,
   ApiModeResolutionError,
   InvalidMessageError,

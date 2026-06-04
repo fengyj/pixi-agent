@@ -3,6 +3,8 @@ import type {
   MessageParam,
   Tool as AnthropicTool,
   TextBlockParam,
+  TextCitation,
+  TextCitationParam,
   ImageBlockParam,
   DocumentBlockParam,
   ToolUseBlockParam,
@@ -37,6 +39,9 @@ import {
   DocumentPart,
   RefusalPart,
   RoleType,
+  CitationFileLocation,
+  CitationOthersLocation,
+  CitationWebLocation,
 } from '../message';
 import {
   AgentInterruptedError,
@@ -244,11 +249,6 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
       : params;
   }
 
-  private isOfficialService(): boolean {
-    const normalized = AnthropicTransport.normalizeBaseUrl(this.configuredBaseUrl)?.toLowerCase();
-    return !normalized || normalized === AnthropicTransport.OFFICIAL_BASE_URL;
-  }
-
   private getStreamRequestOptions(requestOptions?: ModelRequestOptions): {
     signal?: AbortSignal;
     timeout?: number;
@@ -309,87 +309,11 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
     } as ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>;
   }
 
-  private async generateWithOfficialStream(
+  private async generateStream(
     params: MessageStreamParams,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
   ): Promise<ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>> {
-    let textChunkStarted = false;
-    let thinkingChunkStarted = false;
-    let thinkingText = '';
-    let currentToolName: string | undefined;
-
-    const stream = this.client.messages.stream(
-      params,
-      this.getStreamRequestOptions(requestOptions),
-    );
-
-    for await (const event of stream) {
-      if (event.type === 'content_block_start') {
-        if (event.content_block.type === 'tool_use') {
-          currentToolName = event.content_block.name;
-        }
-      } else if (event.type === 'content_block_delta') {
-        const delta = event.delta;
-        if (delta.type === 'text_delta') {
-          if (thinkingChunkStarted) {
-            thinkingChunkStarted = false;
-            callbacks?.onThinkingChunk?.('', 'end');
-            callbacks?.onThinking?.(thinkingText);
-            thinkingText = '';
-          }
-          if (!textChunkStarted) {
-            textChunkStarted = true;
-            callbacks?.onTextChunk?.(delta.text, 'begin');
-          } else {
-            callbacks?.onTextChunk?.(delta.text);
-          }
-          callbacks?.onText?.(delta.text);
-        } else if (delta.type === 'thinking_delta') {
-          thinkingText += delta.thinking;
-          if (!thinkingChunkStarted) {
-            thinkingChunkStarted = true;
-            callbacks?.onThinkingChunk?.(delta.thinking, 'begin');
-          } else {
-            callbacks?.onThinkingChunk?.(delta.thinking);
-          }
-        } else if (delta.type === 'input_json_delta' && currentToolName) {
-          callbacks?.onToolUse?.(currentToolName, delta.partial_json);
-        }
-      } else if (event.type === 'content_block_stop') {
-        currentToolName = undefined;
-      } else if (event.type === 'message_stop') {
-        if (textChunkStarted) {
-          textChunkStarted = false;
-          callbacks?.onTextChunk?.('', 'end');
-        }
-        if (thinkingChunkStarted) {
-          thinkingChunkStarted = false;
-          callbacks?.onThinkingChunk?.('', 'end');
-          callbacks?.onThinking?.(thinkingText);
-          thinkingText = '';
-        }
-      }
-    }
-
-    if (textChunkStarted) callbacks?.onTextChunk?.('', 'end');
-    if (thinkingChunkStarted) {
-      callbacks?.onThinkingChunk?.('', 'end');
-      callbacks?.onThinking?.(thinkingText);
-    }
-
-    const response = await stream.finalMessage();
-    return this.toModelResponse(response);
-  }
-
-  private async generateWithThirdPartyCreate(
-    params: MessageStreamParams,
-    callbacks?: StreamCallbacks,
-    requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>> {
-    let textChunkStarted = false;
-    let thinkingChunkStarted = false;
-    let thinkingText = '';
     let currentToolName: string | undefined;
     const toolInputJsonByIndex = new Map<number, string>();
     let response: Message | undefined;
@@ -415,19 +339,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
       } else if (event.type === 'content_block_delta') {
         const delta = event.delta;
         if (delta.type === 'text_delta') {
-          if (thinkingChunkStarted) {
-            thinkingChunkStarted = false;
-            callbacks?.onThinkingChunk?.('', 'end');
-            callbacks?.onThinking?.(thinkingText);
-            thinkingText = '';
-          }
-          if (!textChunkStarted) {
-            textChunkStarted = true;
-            callbacks?.onTextChunk?.(delta.text, 'begin');
-          } else {
-            callbacks?.onTextChunk?.(delta.text);
-          }
-          callbacks?.onText?.(delta.text);
+          callbacks?.onTextChunk?.(delta.text);
 
           if (response && Array.isArray(response.content)) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -437,13 +349,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
             }
           }
         } else if (delta.type === 'thinking_delta') {
-          thinkingText += delta.thinking;
-          if (!thinkingChunkStarted) {
-            thinkingChunkStarted = true;
-            callbacks?.onThinkingChunk?.(delta.thinking, 'begin');
-          } else {
-            callbacks?.onThinkingChunk?.(delta.thinking);
-          }
+          callbacks?.onThinkingChunk?.(delta.thinking);
 
           if (response && Array.isArray(response.content)) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -454,7 +360,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
           }
         } else if (delta.type === 'input_json_delta') {
           if (currentToolName) {
-            callbacks?.onToolUse?.(currentToolName, delta.partial_json);
+            // onToolUse is removed from StreamCallbacks.
           }
           toolInputJsonByIndex.set(
             event.index,
@@ -479,23 +385,8 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
           } as Message['usage'];
         }
       } else if (event.type === 'message_stop') {
-        if (textChunkStarted) {
-          textChunkStarted = false;
-          callbacks?.onTextChunk?.('', 'end');
-        }
-        if (thinkingChunkStarted) {
-          thinkingChunkStarted = false;
-          callbacks?.onThinkingChunk?.('', 'end');
-          callbacks?.onThinking?.(thinkingText);
-          thinkingText = '';
-        }
+        // Nothing to do at stream end for simplified StreamCallbacks.
       }
-    }
-
-    if (textChunkStarted) callbacks?.onTextChunk?.('', 'end');
-    if (thinkingChunkStarted) {
-      callbacks?.onThinkingChunk?.('', 'end');
-      callbacks?.onThinking?.(thinkingText);
     }
 
     if (!response) {
@@ -527,9 +418,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
     const params = this.buildStreamParams(options, messages);
 
     try {
-      return this.isOfficialService()
-        ? await this.generateWithOfficialStream(params, callbacks, requestOptions)
-        : await this.generateWithThirdPartyCreate(params, callbacks, requestOptions);
+      return await this.generateStream(params, callbacks, requestOptions);
     } catch (error) {
       const mappedError = this.wrapRequestError(error, requestOptions);
       await callbacks?.onError?.(mappedError as Error);
@@ -579,7 +468,99 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
   }
 
   private convertToTextBlockParam(part: TextPart | RefusalPart): TextBlockParam {
-    return { type: 'text', text: part.type === 'text' ? part.text : part.reason };
+    const textBlock: TextBlockParam = {
+      type: 'text',
+      text: part.type === 'text' ? part.text : part.reason,
+    };
+
+    if (part.type === 'text' && part.citations && part.citations.length > 0) {
+      const citations = part.citations
+        .map((citation) => this.convertCitationToAnthropicTextCitation(citation))
+        .filter((citation): citation is TextCitation => citation !== undefined);
+      if (citations.length > 0) {
+        textBlock.citations = citations;
+      }
+    }
+
+    return textBlock;
+  }
+
+  private convertCitationToAnthropicTextCitation(citation: CitationFileLocation | CitationOthersLocation | CitationWebLocation): TextCitation | undefined {
+    if (citation.type === 'web_location') {
+      const extra = citation.extra ?? {};
+      return {
+        type: 'web_search_result_location',
+        cited_text: citation.citedText,
+        encrypted_index: String(extra.encrypted_index ?? citation.url),
+        title: citation.title ?? null,
+        url: citation.url,
+      };
+    }
+
+    if (citation.type === 'file_location') {
+      const extra = citation.extra ?? {};
+      switch (citation.rawCitationType) {
+        case 'char_location':
+          return {
+            type: 'char_location',
+            cited_text: citation.citedText,
+            document_index: Number(extra.document_index ?? 0),
+            document_title:
+              typeof extra.document_title === 'string' ? extra.document_title : null,
+            file_id: typeof extra.file_id === 'string' ? extra.file_id : null,
+            start_char_index: citation.startIndex ?? 0,
+            end_char_index: citation.endIndex ?? 0,
+          };
+        case 'page_location':
+          return {
+            type: 'page_location',
+            cited_text: citation.citedText,
+            document_index: Number(extra.document_index ?? 0),
+            document_title:
+              typeof extra.document_title === 'string' ? extra.document_title : null,
+            file_id: typeof extra.file_id === 'string' ? extra.file_id : null,
+            start_page_number: citation.startIndex ?? 0,
+            end_page_number: citation.endIndex ?? 0,
+          };
+        case 'content_block_location':
+          return {
+            type: 'content_block_location',
+            cited_text: citation.citedText,
+            document_index: Number(extra.document_index ?? 0),
+            document_title:
+              typeof extra.document_title === 'string' ? extra.document_title : null,
+            file_id: typeof extra.file_id === 'string' ? extra.file_id : null,
+            start_block_index: citation.startIndex ?? 0,
+            end_block_index: citation.endIndex ?? 0,
+          };
+        default:
+          return undefined;
+      }
+    }
+
+    if (citation.type === 'others_location') {
+      const extra = citation.extra ?? {};
+      if (citation.rawCitationType === 'web_search_result_location') {
+        return {
+          type: 'web_search_result_location',
+          cited_text: citation.citedText,
+          encrypted_index: String(extra.encrypted_index ?? citation.source),
+          title: citation.title ?? null,
+          url: String(extra.url ?? citation.source),
+        };
+      }
+      return {
+        type: 'search_result_location',
+        cited_text: citation.citedText,
+        source: citation.source,
+        search_result_index: Number(extra.search_result_index ?? 0),
+        start_block_index: citation.startIndex ?? 0,
+        end_block_index: citation.endIndex ?? 0,
+        title: citation.title ?? null,
+      };
+    }
+
+    return undefined;
   }
 
   private convertToThinkingBlockParam(part: ThinkingPart): ThinkingBlockParam {
@@ -679,7 +660,101 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
   }
 
   convertToTextPart(block: TextBlockParam): TextPart {
-    return { type: 'text', text: block.text };
+    return {
+      type: 'text',
+      text: block.text,
+      citations:
+        block.citations?.flatMap((c) => {
+          const citation = this.convertAnthropicCitationToSessionCitation(c);
+          return citation ? [citation] : [];
+        }) ?? undefined,
+    };
+  }
+
+  private convertAnthropicCitationToSessionCitation(
+    citation: TextCitation | TextCitationParam,
+  ): CitationFileLocation | CitationOthersLocation | CitationWebLocation | null {
+    const extra: Record<string, unknown> = {
+      ...(citation as unknown as Record<string, unknown>),
+    };
+    delete extra.type;
+    delete extra.cited_text;
+
+    if (citation.type === 'char_location') {
+      return {
+        type: 'file_location',
+        fileName:
+          typeof citation.document_title === 'string'
+            ? citation.document_title
+            : String('file_id' in citation && citation.file_id ? citation.file_id : ''),
+        citedText: citation.cited_text,
+        title: typeof citation.document_title === 'string' ? citation.document_title : undefined,
+        startIndex: citation.start_char_index,
+        endIndex: citation.end_char_index,
+        rawCitationType: citation.type,
+        extra,
+      };
+    }
+
+    if (citation.type === 'page_location') {
+      return {
+        type: 'file_location',
+        fileName:
+          typeof citation.document_title === 'string'
+            ? citation.document_title
+            : String('file_id' in citation && citation.file_id ? citation.file_id : ''),
+        citedText: citation.cited_text,
+        title: typeof citation.document_title === 'string' ? citation.document_title : undefined,
+        startIndex: citation.start_page_number,
+        endIndex: citation.end_page_number,
+        rawCitationType: citation.type,
+        extra,
+      };
+    }
+
+    if (citation.type === 'content_block_location') {
+      return {
+        type: 'file_location',
+        fileName:
+          typeof citation.document_title === 'string'
+            ? citation.document_title
+            : String('file_id' in citation && citation.file_id ? citation.file_id : ''),
+        citedText: citation.cited_text,
+        title: typeof citation.document_title === 'string' ? citation.document_title : undefined,
+        startIndex: citation.start_block_index,
+        endIndex: citation.end_block_index,
+        rawCitationType: citation.type,
+        extra,
+      };
+    }
+
+    if (citation.type === 'web_search_result_location') {
+      return {
+        type: 'others_location',
+        source: citation.url,
+        citedText: citation.cited_text,
+        title: citation.title ?? undefined,
+        startIndex: undefined,
+        endIndex: undefined,
+        rawCitationType: citation.type,
+        extra,
+      };
+    }
+
+    if (citation.type === 'search_result_location') {
+      return {
+        type: 'others_location',
+        source: citation.source,
+        citedText: citation.cited_text,
+        title: citation.title ?? undefined,
+        startIndex: citation.start_block_index,
+        endIndex: citation.end_block_index,
+        rawCitationType: citation.type,
+        extra,
+      };
+    }
+
+    return null;
   }
 
   convertToThinkingPart(block: ThinkingBlockParam): ThinkingPart {

@@ -5,11 +5,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { PixiAgent, PixiAgentOptions } from '@pixiagent/core/agent';
-import { ModelRequestTimeoutError } from '@pixiagent/core/errors';
-import { ApiModes, SessionMessage } from '@pixiagent/core/message';
-import { Session, SessionThread } from '@pixiagent/core/session';
-import { ToolRegistry } from '../../../dist/tools/tool';
+import { PixiAgent, PixiAgentOptions, ApiModes, SessionMessage, Session, SessionThread } from '../../../src';
+import { ModelRequestTimeoutError } from '../../../src/errors';
+import { ToolRegistry } from '../../../src/tools';
 
 type LiveCase = {
   name: string;
@@ -70,7 +68,7 @@ function createAgent(
   return { agent, thread };
 }
 
-function buildUserMessage(content: string): SessionMessage {
+function buildUserMessage(content: string): Omit<SessionMessage, 'messageId' | 'role'> & { messageId?: string; role: 'user' } {
   return {
     type: 'session_message',
     role: 'user',

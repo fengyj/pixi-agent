@@ -38,39 +38,23 @@ export function baseOptions(model: string, extra?: Partial<ModelOptions>): Model
 
 export type CollectedCallbacks = {
   textChunks: string[];
-  textChunkFlags: Array<'begin' | 'end' | undefined>;
   thinkingChunks: string[];
-  thinkingChunkFlags: Array<'begin' | 'end' | undefined>;
-  thinkingFull: string[];
-  toolUseEvents: Array<{ name: string; delta: string }>;
   errors: Error[];
 };
 
 export function makeCallbacks(): { callbacks: StreamCallbacks; collected: CollectedCallbacks } {
   const collected: CollectedCallbacks = {
     textChunks: [],
-    textChunkFlags: [],
     thinkingChunks: [],
-    thinkingChunkFlags: [],
-    thinkingFull: [],
-    toolUseEvents: [],
     errors: [],
   };
 
   const callbacks: StreamCallbacks = {
-    onTextChunk: (delta, flag) => {
+    onTextChunk: (delta) => {
       collected.textChunks.push(delta);
-      collected.textChunkFlags.push(flag);
     },
-    onThinkingChunk: (delta, flag) => {
+    onThinkingChunk: (delta) => {
       collected.thinkingChunks.push(delta);
-      collected.thinkingChunkFlags.push(flag);
-    },
-    onThinking: (text) => {
-      collected.thinkingFull.push(text);
-    },
-    onToolUse: (name, delta) => {
-      collected.toolUseEvents.push({ name, delta });
     },
     onError: (err) => {
       collected.errors.push(err);
@@ -125,6 +109,7 @@ export async function handleToolCalls(
 
   return [
     {
+      messageId: `tool_results_id`,
       type: 'session_message',
       role: 'tool',
       content: toolResults,
@@ -144,14 +129,12 @@ export function assertTextStreamed(collected: CollectedCallbacks) {
     collected.textChunks.some((c) => c.length > 0),
     'at least one non-empty text chunk expected',
   ).toBe(true);
-  expect(collected.textChunkFlags, 'text chunks should start with begin').toContain('begin');
-  expect(collected.textChunkFlags, 'text chunks should end with end').toContain('end');
 }
 
 export function assertTextDeltaMatchesFinalMessage(
   collected: CollectedCallbacks,
   transport: ProviderTransport<RawMessageType>,
-  result: RawMessageType,
+  result: RawMessageType
 ) {
   const streamedText = collected.textChunks.join('');
   const sessionMsg = transport.convertFromRawMessage(result);
@@ -191,13 +174,6 @@ export function assertThinkingStreamed(collected: CollectedCallbacks) {
     collected.thinkingChunks.some((c) => c.length > 0),
     'at least one non-empty thinking chunk expected',
   ).toBe(true);
-  expect(collected.thinkingChunkFlags, 'thinking chunks should start with begin').toContain('begin');
-  expect(collected.thinkingChunkFlags, 'thinking chunks should end with end').toContain('end');
-  expect(collected.thinkingFull.length, 'onThinking should have been called').toBeGreaterThan(0);
-  expect(
-    collected.thinkingFull[0].length,
-    'onThinking text should be non-empty',
-  ).toBeGreaterThan(0);
 }
 
 export function assertThinkingInConvertedMessage(
@@ -261,6 +237,7 @@ export function assertBidirectionalConversion(
   transport: ProviderTransport<RawMessageType>,
 ): void {
   const userMsg: SessionMessage = {
+    messageId: `user_msg_id`,
     type: 'session_message',
     role: 'user',
     content: 'Hello transport conversion!',
@@ -271,6 +248,7 @@ export function assertBidirectionalConversion(
   expect(getAllText(userRoundTrip.content as string | Array<TextPart>)).toContain('Hello');
 
   const assistantTextMsg: SessionMessage = {
+    messageId: `assistant_msg_id`,
     type: 'session_message',
     role: 'assistant',
     content: [{ type: 'text', text: 'Round-trip assistant text.' }],
@@ -283,6 +261,7 @@ export function assertBidirectionalConversion(
   );
 
   const assistantToolCall: SessionMessage = {
+    messageId: `assistant_tool_call_id`,
     type: 'session_message',
     role: 'assistant',
     content: [
@@ -304,6 +283,7 @@ export function assertBidirectionalConversion(
   expect(roundTripToolCall?.name).toBe('future_weather');
 
   const toolResultMsg: SessionMessage = {
+    messageId: `tool_result_msg_id`,
     type: 'session_message',
     role: 'tool',
     content: [
@@ -326,6 +306,7 @@ export function assertBidirectionalConversion(
   expect(roundTripToolResults.some((p) => p.id === 'call_1')).toBe(true);
 
   const multiToolResultMsg: SessionMessage = {
+    messageId: `multi_tool_result_msg_id`,
     type: 'session_message',
     role: 'tool',
     content: [
@@ -388,7 +369,7 @@ export async function runStandardConversation(
     const { callbacks, collected } = makeCallbacks();
     const messages: SessionMessage[] = [
       ...history,
-      { type: 'session_message', role: 'user', content: 'Hello! My name is Eric. What is 2 + 2?' },
+      { messageId: `user_msg_id`, type: 'session_message', role: 'user', content: 'Hello! My name is Eric. What is 2 + 2?' },
     ];
 
     const result = await transport.generate(
@@ -396,20 +377,22 @@ export async function runStandardConversation(
       sessionMessagesToRawMessages(transport, messages),
       callbacks,
     );
+    const resultMsg = {...result.responseMessage, messageId: `assistant_msg_id` } as RawMessageType;
 
     assertUsage(result.usage);
     assertTextStreamed(collected);
-    assertTextDeltaMatchesFinalMessage(collected, transport, result.responseMessage);
+    assertTextDeltaMatchesFinalMessage(collected, transport, resultMsg);
 
     // push to history
     history.push(messages[messages.length - 1]);
-    history.push(transport.convertFromRawMessage(result.responseMessage));
+    history.push(transport.convertFromRawMessage(resultMsg));
   }
 
   // ── Turn 2: tool call – future_weather (no args) ─────────────────────────
   {
     const { callbacks, collected } = makeCallbacks();
     const userMsg: SessionMessage = {
+      messageId: `user_msg_id`,
       type: 'session_message',
       role: 'user',
       content: 'What will the weather be like tomorrow?',
@@ -421,38 +404,43 @@ export async function runStandardConversation(
       sessionMessagesToRawMessages(transport, messages),
       callbacks,
     );
+    const resultMsg = {...result.responseMessage, messageId: `assistant_msg_id` } as RawMessageType;
+
 
     assertUsage(result.usage);
-    assertToolCallInResult(result.responseMessage, transport, 'future_weather');
+    assertToolCallInResult(resultMsg, transport, 'future_weather');
     expect(collected.errors).toHaveLength(0);
 
     // execute tool and continue conversation
-    const toolResults = await handleToolCalls(transport, result.responseMessage);
+    const toolResults = await handleToolCalls(transport, resultMsg);
     history.push(userMsg);
-    history.push(transport.convertFromRawMessage(result.responseMessage));
+    history.push(transport.convertFromRawMessage(resultMsg));
     history.push(...toolResults);
 
     // one more turn to get the summary
     const { callbacks: cb2, collected: col2 } = makeCallbacks();
     const followUp: SessionMessage[] = [
       ...history,
-      { type: 'session_message', role: 'user', content: 'Please summarize the weather forecast.' },
+      { messageId: `user_msg_id`, type: 'session_message', role: 'user', content: 'Please summarize the weather forecast.' },
     ];
     const result2 = await transport.generate(
       baseOptions(model, opts.extraOptions),
       sessionMessagesToRawMessages(transport, followUp),
       cb2,
     );
+    const resultMsg2 = {...result2.responseMessage, messageId: `assistant_msg_id` } as RawMessageType;
+
     assertUsage(result2.usage)  ;
     assertTextStreamed(col2);
     history.push(followUp[followUp.length - 1]);
-    history.push(transport.convertFromRawMessage(result2.responseMessage));
+    history.push(transport.convertFromRawMessage(resultMsg2));
   }
 
   // ── Turn 3: tool call – stock_ohlc (with args) ───────────────────────────
   {
     const { callbacks } = makeCallbacks();
     const userMsg: SessionMessage = {
+      messageId: `user_msg_id`,
       type: 'session_message',
       role: 'user',
       content: "What was Apple's stock price (ticker AAPL) on 2024-01-15?",
@@ -464,22 +452,25 @@ export async function runStandardConversation(
       sessionMessagesToRawMessages(transport, messages),
       callbacks,
     );
+    const resultMsg = {...result.responseMessage, messageId: `assistant_msg_id` } as RawMessageType;
+
 
     assertUsage(result.usage);
-    const toolCall = assertToolCallInResult(result.responseMessage, transport, 'stock_ohlc');
+    const toolCall = assertToolCallInResult(resultMsg, transport, 'stock_ohlc');
     const args = JSON.parse(toolCall.arguments || '{}');
     expect(args.ticker?.toUpperCase()).toBe('AAPL');
     expect(args.date).toBe('2024-01-15');
 
-    const toolResults = await handleToolCalls(transport, result.responseMessage);
+    const toolResults = await handleToolCalls(transport, resultMsg);
     history.push(userMsg);
-    history.push(transport.convertFromRawMessage(result.responseMessage));
+    history.push(transport.convertFromRawMessage(resultMsg));
     history.push(...toolResults);
 
     const { callbacks: cb2 } = makeCallbacks();
     const followUp: SessionMessage[] = [
       ...history,
       {
+        messageId: `user_msg_id`,
         type: 'session_message',
         role: 'user',
         content: 'Thanks. Can you summarize the stock data?',
@@ -490,9 +481,10 @@ export async function runStandardConversation(
       sessionMessagesToRawMessages(transport, followUp),
       cb2,
     );
+    const resultMsg2 = {...result2.responseMessage, messageId: `assistant_msg_id` } as RawMessageType;
     assertUsage(result2.usage);
     history.push(followUp[followUp.length - 1]);
-    history.push(transport.convertFromRawMessage(result2.responseMessage));
+    history.push(transport.convertFromRawMessage(resultMsg2));
   }
 
   // ── Turn 4: reasoning ────────────────────────────────────────────────────
@@ -500,6 +492,7 @@ export async function runStandardConversation(
     const reasoningModel = opts.reasoningModel ?? model;
     const { callbacks, collected } = makeCallbacks();
     const userMsg: SessionMessage = {
+      messageId: `user_msg_id`,
       type: 'session_message',
       role: 'user',
       content:
@@ -511,14 +504,15 @@ export async function runStandardConversation(
       sessionMessagesToRawMessages(transport, [userMsg]),
       callbacks,
     );
-
+    const resultMsg = {...result.responseMessage, messageId: `assistant_msg_id` } as RawMessageType;
+    
     assertUsage(result.usage);
     assertTextStreamed(collected);
-    assertTextDeltaMatchesFinalMessage(collected, transport, result.responseMessage);
+    assertTextDeltaMatchesFinalMessage(collected, transport, resultMsg);
     assertThinkingStreamed(collected);
     if (opts.reasoningInFinalMessage ?? true) {
-      assertThinkingInConvertedMessage(transport, result.responseMessage);
-      assertThinkingDeltaMatchesFinalMessage(collected, transport, result.responseMessage);
+      assertThinkingInConvertedMessage(transport, resultMsg);
+      assertThinkingDeltaMatchesFinalMessage(collected, transport, resultMsg);
     }
   }
 }

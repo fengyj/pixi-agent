@@ -23,10 +23,16 @@ import {
 } from './message';
 import { ToolRegistry } from './tools/tool';
 import type { AgentSpan } from './observation';
-import { AgentInterruptedError, ApiModeResolutionError, InvalidMessageError } from './errors/types';
+import {
+  AgentConcurrentExecutionError,
+  AgentInterruptedError,
+  ApiModeResolutionError,
+  InvalidMessageError,
+} from './errors/types';
 import { ModelResponse } from './transports/base';
 
 import * as Observation from './observation';
+import { AgentEventEmitter } from './event';
 const trace = Observation.getTracer('pixiagent.agent');
 const { withSpan, retry } = Observation.Helpers;
 
@@ -39,9 +45,9 @@ export class PixiAgent {
   private isRunning = false;
   // todo: add event listener as parameter to expose the events.
   constructor(
-    public sessionThread: SessionThread,
-    public toolRegistry: ToolRegistry,
-    public options?: PixiAgentOptions,
+    public readonly sessionThread: SessionThread,
+    public readonly toolRegistry: ToolRegistry,
+    public readonly options?: PixiAgentOptions,
   ) {
     sessionThread.threadInfo.modelOptions = PixiAgent.resolveApiModeAndBaseUrl(
       sessionThread.threadInfo.modelOptions,
@@ -67,7 +73,7 @@ export class PixiAgent {
   ): Promise<PixiAgentExecutionResult> {
     modelOptions = PixiAgent.resolveApiModeAndBaseUrl(modelOptions);
     if (this.isRunning) {
-      throw new Error('The agent is already running and does not allow concurrent execute calls.');
+      throw new AgentConcurrentExecutionError();
     }
 
     this.isRunning = true;
@@ -79,8 +85,15 @@ export class PixiAgent {
         async () => {
           const transport = this.getTransport(modelOptions);
           const requestInternalMsg = this.enqueueRequestMessage(modelOptions, input);
-          const historyMessages = this.getHistoryMessagesForTransport(modelOptions, transport);
+
+          this.options?.eventEmitter?.emit({
+            eventType: 'execution_state_changed',
+            newState: 'before_model_request',
+            message: requestInternalMsg.rawMessage as SessionMessage,
+          });
+
           userMessageId = requestInternalMsg.internalMessageId;
+          const historyMessages = this.getHistoryMessagesForTransport(modelOptions, transport);
           const stopReason = await this.runExecutionLoop(
             transport,
             modelOptions,
@@ -91,6 +104,13 @@ export class PixiAgent {
           if (stopReason === 'end_turn') {
             this.logger.info('The agent execution is completed');
           }
+
+          this.options?.eventEmitter?.emit({
+            eventType: 'execution_state_changed',
+            newState: stopReason === 'end_turn' ? 'completed' : 'incomplete',
+            stopReason: stopReason,
+            usage: UsageStats.isEmpty(usage) ? undefined : usage,
+          });
 
           return {
             stopReason,
@@ -111,6 +131,15 @@ export class PixiAgent {
           { cancel_reason: this.abortController.signal.reason },
           'The agent execution is interrupted',
         );
+        
+          this.options?.eventEmitter?.emit({
+            eventType: 'execution_state_changed',
+            newState: 'incomplete',
+            stopReason: 'cancelled',
+            usage: UsageStats.isEmpty(usage) ? undefined : usage,
+            error: error as Error,
+          });
+
         return {
           stopReason: 'cancelled',
           userMessageId: userMessageId,
@@ -192,6 +221,15 @@ export class PixiAgent {
           'Response from the LLM',
         );
         this.addResponseSpanAttributes(span, modelOptions, response, responseInternalMsg);
+
+        this.options?.eventEmitter?.emit({
+          eventType: 'execution_state_changed',
+          newState: 'after_model_response',
+          message: respSessionMsg,
+          hasToolCall: response.stopReason === 'tool_call' || false,
+          usage: response.usage,
+        });
+
         return {
           ...response,
           responseMessage: {
@@ -266,7 +304,7 @@ export class PixiAgent {
     modelOptions: ModelOptions,
     historyMessages: RawMessageType[],
     usage: UsageStats,
-  ): Promise<PixiAgentExecutionResult['stopReason']> {
+  ): Promise<AgentStopReason> {
     let iterations = 0;
     while (this.abortController.signal.aborted === false) {
       if (this.hasReachedMaxIterations(iterations)) {
@@ -286,6 +324,13 @@ export class PixiAgent {
         iterations,
       );
       UsageStats.sum(usage, response.usage);
+
+      this.options?.eventEmitter?.emit({
+        eventType: 'execution_state_changed',
+        newState: 'iteration_completed',
+        iteration: iterations,
+      });
+
       iterations++;
 
       const stopReason = this.getLoopStopReason(response, modelOptions);
@@ -308,7 +353,7 @@ export class PixiAgent {
     return await withSpan(
       'agent_iteration',
       async () => {
-        this.refreshHistoryIfMediaExpired(modelOptions, transport, historyMessages);
+        this.ensureMediaSources(modelOptions, transport, historyMessages);
         const response = await this.executeLLMRequest(transport, modelOptions, historyMessages);
 
         if (response.stopReason === 'tool_call') {
@@ -325,7 +370,17 @@ export class PixiAgent {
     );
   }
 
-  private refreshHistoryIfMediaExpired(
+  /**
+   * Ensure the media sources in the history messages are valid. This is used for the media sources
+   * which are not embedded as base64 in the messages.
+   * If the media source is expired (URL or file id), or the file id is not for the provider,
+   * will refresh the URL or reupload the file to the current provider, and update the media source
+   * in the message.
+   * @param modelOptions
+   * @param transport
+   * @param historyMessages
+   */
+  private ensureMediaSources(
     modelOptions: ModelOptions,
     transport: ProviderTransport<RawMessageType>,
     historyMessages: RawMessageType[],
@@ -342,10 +397,18 @@ export class PixiAgent {
     }
   }
 
+  /**
+   * Returns undefined when the reason is tool_call, otherwise returns the stop reason.
+   * For the reasons which are not directly mapped to the agent stop reason,
+   * will return 'cancelled'.
+   * @param response
+   * @param modelOptions
+   * @returns
+   */
   private getLoopStopReason(
     response: ModelResponse<RawMessageType>,
     modelOptions: ModelOptions,
-  ): PixiAgentExecutionResult['stopReason'] | undefined {
+  ): AgentStopReason | undefined {
     if (response.stopReason === 'tool_call') {
       return undefined;
     }
@@ -379,7 +442,7 @@ export class PixiAgent {
       return 'cancelled';
     }
 
-    return 'end_turn';
+    return 'cancelled';
   }
 
   private getExecutionMetadata(): Record<string, unknown> {
@@ -497,9 +560,25 @@ export class PixiAgent {
         `execute_tool ${toolCall.name}`,
         async () => {
           this.throwIfInterrupted('The agent execution is interrupted, cannot execute tool call');
-          return await this.toolRegistry.execute(toolCall, {
+
+          this.options?.eventEmitter?.emit({
+            eventType: 'execution_state_changed',
+            newState: 'before_tool_call_request',
+            toolCall: toolCall,
+          });
+
+          const result = await this.toolRegistry.execute(toolCall, {
             signal: this.abortController.signal,
           });
+
+          this.options?.eventEmitter?.emit({
+            eventType: 'execution_state_changed',
+            newState: 'after_tool_call_response',
+            toolCall: toolCall,
+            toolResult: result,
+          });
+
+          return result;
         },
         {
           tracer: trace,
@@ -512,7 +591,16 @@ export class PixiAgent {
         },
       );
     } catch (error) {
-      return this.toToolCallErrorResult(toolCall, error);
+      const result = this.toToolCallErrorResult(toolCall, error);
+
+      this.options?.eventEmitter?.emit({
+        eventType: 'execution_state_changed',
+        newState: 'after_tool_call_response',
+        toolCall: toolCall,
+        toolResult: result,
+      });
+
+      return result;
     }
   }
 
@@ -544,6 +632,13 @@ export class PixiAgent {
       resultMsg,
       modelOptions,
     );
+
+    this.options?.eventEmitter?.emit({
+      eventType: 'execution_state_changed',
+      newState: 'tool_calls_finished',
+      message: resultInternalMsg.rawMessage as SessionMessage,
+    });
+
     const rawResultMessages = this.toRawMessageArray(
       transport.convertToRawMessage(resultInternalMsg.rawMessage as SessionMessage),
     );
@@ -831,10 +926,21 @@ export interface PixiAgentOptions {
    * The retry times for tool call is defined in the ToolRegistry.
    */
   maxModelRequestRetries?: number;
+  /**
+   * The event emitter to emit the agent events.
+   */
+  eventEmitter?: AgentEventEmitter;
 }
 
+export type AgentStopReason =
+  | 'end_turn'
+  | 'max_turn_requests'
+  | 'max_tokens'
+  | 'refusal'
+  | 'cancelled';
+
 export interface PixiAgentExecutionResult {
-  stopReason: 'end_turn' | 'max_turn_requests' | 'max_tokens' | 'refusal' | 'cancelled';
+  stopReason: AgentStopReason;
   usage?: UsageStats;
   userMessageId?: string;
   metadata?: Record<string, unknown>;

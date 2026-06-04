@@ -7,7 +7,7 @@
  */
 
 import { describe, it } from 'vitest';
-import { AnthropicTransport } from '@pixiagent/core/transports/anthropic';
+import { AnthropicTransport } from '../../../src/transports/anthropic';
 import { runStandardConversation } from './helpers';
 
 const API_KEY = process.env.OFOXAI_API_KEY;

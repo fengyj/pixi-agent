@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { defineTool, Tool } from '../../../src/tool';
+import { defineTool, Tool } from '../../../src/tools';
 
 const generateFutureWeather = () => {
   const today = new Date();

@@ -24,7 +24,7 @@ import {
   ThinkingPart,
   ContentPart,
 } from '../../message';
-import { ApiModeResolver, DialectResolver, ModelOptions } from '../base';
+import { ApiModeResolver, DialectResolver, ModelOptions, StreamDataExtractor } from '../base';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 const OPENROUTER_RESPONSES_ENDPOINT = 'https://openrouter.ai/api/v1/responses';
@@ -175,33 +175,89 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
     return { ...msg, content: ContentPart.concat(thinkingParts, msg.content) };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extractFromDelta(data: string, delta: ChatCompletionChunk.Choice.Delta): any {
-    if (data !== 'reasoning') return null;
+  async extractFromDelta<T extends Record<string, unknown>>(
+    data: string,
+    delta: ChatCompletionChunk.Choice.Delta,
+    streamDataExtractor: StreamDataExtractor<T>,
+  ): Promise<void> {
+    const getMessageObj = (acc: T): Record<string, unknown> | undefined => {
+      if (!('choices' in acc && Array.isArray(acc.choices) && acc.choices.length > 0))
+        return undefined;
+      if (!('message' in acc.choices[0] && typeof acc.choices[0].message === 'object'))
+        return undefined;
+      return acc.choices[0].message;
+    };
 
-    // OpenRouter streaming: reasoning can arrive in reasoning_details with either
-    // reasoning.text or reasoning.summary blocks depending on upstream provider.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const reasoningDetails = (delta as any).reasoning_details;
-    if (Array.isArray(reasoningDetails)) {
-      const text = reasoningDetails
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .map((d: any) => {
-          if (d.type === 'reasoning.text') {
-            return d.text ?? d.delta ?? '';
-          }
-          if (d.type === 'reasoning.summary') {
-            return d.summary ?? d.text ?? d.delta ?? '';
-          }
-          return '';
-        })
-        .join('');
-      if (text) return text;
+    if (data === 'reasoning') {
+      // https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+      if (
+        'reasoning_details' in delta &&
+        Array.isArray(delta.reasoning_details) &&
+        delta.reasoning_details.length > 0 &&
+        delta.reasoning_details.every(
+          (d) =>
+            typeof d === 'object' &&
+            typeof d.type === 'string' &&
+            (d.type === 'reasoning.text' || d.type === 'reasoning.summary') &&
+            (typeof d.text === 'string' || typeof d.summary === 'string'),
+        )
+      ) {
+        for (const detail of delta.reasoning_details) {
+          await streamDataExtractor.accumulate(
+            {
+              key: `reasoning_details_${detail.index}`,
+              value: detail,
+            },
+            (acc, newData) => {
+              const message = getMessageObj(acc);
+              if (!message) return;
+              if (!('reasoning_details' in message) || !Array.isArray(message.reasoning_details)) {
+                (
+                  message as Record<string, unknown> & { reasoning_details: unknown[] }
+                ).reasoning_details = [];
+              }
+              (message.reasoning_details as unknown[]).push(newData);
+            },
+            (existing, newData, _acc) => {
+              existing.type = existing.type ?? newData.type;
+              if ('summary' in newData) {
+                existing.summary = `${existing.summary ?? ''}${newData.summary ?? ''}`;
+              } else if ('text' in newData) {
+                existing.text = `${existing.text ?? ''}${newData.text ?? ''}`;
+              }
+              existing.id = existing.id ?? newData.id;
+              existing.format = existing.format ?? newData.format;
+              if ('signature' in newData && typeof newData.signature === 'string') {
+                existing.signature = `${existing.signature ?? ''}${newData.signature ?? ''}`;
+              }
+            },
+            (data) => ({ type: 'thinking' as const, content: data.summary ?? (!data.signature || data.signature === '' ? data.text ?? '' : '') }),
+          );
+        }
+      } else if (
+        ('reasoning' in delta &&
+          typeof delta.reasoning === 'string' &&
+          delta.reasoning.length > 0) ||
+        ('reasoning_content' in delta &&
+          typeof delta.reasoning_content === 'string' &&
+          delta.reasoning_content.length > 0)
+      ) {
+        const propName = 'reasoning' in delta ? 'reasoning' : 'reasoning_content';
+        await streamDataExtractor.accumulate(
+          { key: propName, value: (delta as Record<string, unknown>)[propName] as string },
+          (acc, newData) => {
+            const message = getMessageObj(acc);
+            if (!message) return;
+            if (!(propName in message) || typeof message[propName] !== 'string') {
+              (message as Record<string, unknown> & { [key: string]: string })[propName] = '';
+            }
+            (message as Record<string, unknown> & { [key: string]: string })[propName] += newData;
+          },
+          null,
+          (data) => ({ type: 'thinking' as const, content: data }),
+        );
+      }
     }
-
-    // Fallback: legacy delta.reasoning (or reasoning_content) field
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (delta as any).reasoning ?? (delta as any).reasoning_content ?? undefined;
   }
 
   extractFromResponse(
@@ -264,9 +320,14 @@ export class OpenRouterResponseDialectResolver implements DialectResolver<
     return msg;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extractFromDelta(_data: 'reasoning' | string, _delta: ResponseStreamEvent): any {
-    return undefined;
+  extractFromDelta<T extends Record<string, unknown>>(
+    _data: 'reasoning' | string,
+    _delta: ResponseStreamEvent,
+    _streamDataExtractor: StreamDataExtractor<T>,
+  ): Promise<void> {
+    // https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+    // todo: implement reasoning data from delta
+    return Promise.resolve();
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -304,9 +365,14 @@ export class OpenRouterAnthropicDialectResolver implements DialectResolver<
     return msg;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extractFromDelta(_data: 'reasoning' | string, _delta: RawContentBlockDelta): any {
-    return undefined;
+  extractFromDelta<T extends Record<string, unknown>>(
+    _data: 'reasoning' | string,
+    _delta: RawContentBlockDelta,
+    _streamDataExtractor: StreamDataExtractor<T>,
+  ): Promise<void> {
+    // https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+    // todo: implement reasoning data from delta
+    return Promise.resolve();
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -25,7 +25,7 @@ import { Writable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pino from 'pino';
-import { Observation } from '@pixiagent/core/observation';
+import { Observation } from '../../../src';
 const { setupObservability, shutdownObservability } = Observation;
 
 // ── helpers ──────────────────────────────────────────────────────────────────

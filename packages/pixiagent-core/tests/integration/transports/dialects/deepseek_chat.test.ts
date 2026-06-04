@@ -10,8 +10,8 @@
  */
 
 import { describe, it } from 'vitest';
-import { ChatCompletionTransport } from '@pixiagent/core/transports/chat_completion';
-import { DeepSeekChatDialectResolver } from '@pixiagent/core/transports/dialects/deepseek';
+import { ChatCompletionTransport } from '../../../../src/transports/chat_completion';
+import { DeepSeekChatDialectResolver } from '../../../../src/transports/dialects/deepseek';
 import { runStandardConversation } from '../helpers';
 
 const API_KEY = process.env.DEEPSEEK_API_KEY;

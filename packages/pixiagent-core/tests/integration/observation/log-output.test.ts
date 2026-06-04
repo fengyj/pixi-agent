@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, it } from 'vitest';
-import { Observation } from '../../../src/observation';
+import { Observation } from '../../../src';
 const { getLogger, setupObservability, shutdownObservability } = Observation;
 
 describe('observation integration smoke — write logs to ES', () => {

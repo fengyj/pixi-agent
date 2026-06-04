@@ -7,10 +7,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { PixiAgent } from '@pixiagent/core/agent';
-import { ApiModes } from '@pixiagent/core/message';
-import { Session } from '@pixiagent/core/session';
-import { ToolRegistry } from '@pixiagent/core/tool';
+import { PixiAgent, ApiModes, Session } from '../../../src';
+import { ToolRegistry } from '../../../src/tools';
 
 const API_KEY = process.env.DEEPSEEK_API_KEY;
 const BASE_URL = 'https://api.deepseek.com';

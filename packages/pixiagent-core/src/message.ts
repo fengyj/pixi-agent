@@ -10,9 +10,11 @@ import type {
   Response,
   ResponseCreateParams,
   ResponseInputItem,
+  ResponseOutputItem,
   ResponseStreamEvent,
 } from 'openai/resources/responses/responses';
 import { z } from 'zod';
+import { ModelProvider } from './model';
 
 export enum ApiModes {
   COMPLETIONS = 'completions',
@@ -131,10 +133,10 @@ const MediaSourceSchema = z.union([
      */
     fileName: z.string().optional(),
     /**
-     * The URI of the media, which is optional.
-     * It can be used to indicate the location of the media.
+     * The ID of the media, which is optional.
+     * If it's not undefined, it can be used to get the media details from the Session object.
      */
-    uri: z.string().optional(),
+    mediaSourceId: z.string().optional(),
   }),
   z.object({
     sourceType: z.literal('url'),
@@ -146,10 +148,10 @@ const MediaSourceSchema = z.union([
     fileName: z.string().optional(),
     expireAt: z.number().optional(),
     /**
-     * The URI of the media, which is optional.
-     * It can be used to indicate the original location of the media.
+     * The ID of the media, which is optional.
+     * If it's not undefined, it can be used to get the media details from the Session object.
      */
-    uri: z.string().optional(),
+    mediaSourceId: z.string().optional(),
   }),
   z.object({
     sourceType: z.literal('file_id'),
@@ -161,10 +163,10 @@ const MediaSourceSchema = z.union([
      */
     fileName: z.string().optional(),
     /**
-     * The URI of the media, which is optional.
-     * It can be used to indicate the original location of the media.
+     * The ID of the media, which is optional.
+     * If it's not undefined, it can be used to get the media details from the Session object.
      */
-    uri: z.string().optional(),
+    mediaSourceId: z.string().optional(),
   }),
 ]);
 
@@ -192,8 +194,6 @@ const CitationFileLocationSchema = z.object({
   startIndex: z.number().optional(),
   /** can be end_page_number/end_block_index/end_index/etc. */
   endIndex: z.number().optional(),
-  /** Used for identifying the citation/annotation type from the raw message */
-  rawCitationType: z.string(),
   /** For the fields not very common in the original citation/annotation data */
   extra: z.record(z.string(), z.unknown()).optional(),
 });
@@ -207,8 +207,6 @@ const CitationOthersLocationSchema = z.object({
   title: z.string().optional(),
   startIndex: z.number().optional(),
   endIndex: z.number().optional(),
-  /** Used for identifying the citation/annotation type from the raw message */
-  rawCitationType: z.string(),
   /** For the fields not very common in the original citation/annotation data */
   extra: z.record(z.string(), z.unknown()).optional(),
 });
@@ -275,8 +273,14 @@ const VideoPartSchema = z.object({
 export type VideoPart = z.infer<typeof VideoPartSchema>;
 
 const ToolCallPartSchema = z.object({
+  /**
+   * "Client" (opposite to the LLM server) side tool call.
+   */
   type: z.literal('tool_call'),
   id: z.string(),
+  /**
+   * Tool name
+   */
   name: z.string(),
   /**
    * The JSON string of the arguments.
@@ -285,6 +289,10 @@ const ToolCallPartSchema = z.object({
    * needs to convert the data to JSON.
    */
   arguments: z.string(),
+  /**
+   * Indicate if the tool call is a specific function call only used for the particular LLM provider.
+   */
+  providerSpecific: z.enum(ApiModes).optional(),
 });
 
 export type ToolCallPart = z.infer<typeof ToolCallPartSchema>;
@@ -295,21 +303,13 @@ const ToolResultPartSchema = z.object({
   name: z.string().optional(),
   /**
    * The JSON string of the result.
-   * The Anthropic supports the image as the result of the tool call.
    */
-  result: z.union([
-    z.string(),
-    z.array(
-      z.union([
-        TextPartSchema,
-        ImagePartSchema,
-        DocumentPartSchema,
-        AudioPartSchema,
-        VideoPartSchema,
-      ]),
-    ),
-  ]),
+  result: z.string().optional(),
   isError: z.boolean().optional(),
+  /**
+   * Indicate if the tool call is a specific function call only used for the particular LLM provider.
+   */
+  providerSpecific: z.enum(ApiModes).optional(),
 });
 
 export type ToolResultPart = z.infer<typeof ToolResultPartSchema>;
@@ -396,7 +396,7 @@ function getContentDigest(
 }
 
 function createProviderToolCallArguments(
-  provider: string,
+  provider: ModelProvider,
   rawType: string,
   rawRequest: unknown,
 ): string {
@@ -437,7 +437,7 @@ export type ResponseApiMessage = {
   messageId: string;
   type: 'response_api_message';
   role: RoleType;
-  content: Array<ResponseInputItem>;
+  content: Array<ResponseInputItem | ResponseOutputItem>;
   metadata?: Record<string, unknown>;
 };
 

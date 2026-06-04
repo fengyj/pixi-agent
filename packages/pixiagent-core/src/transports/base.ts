@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   ApiModes,
+  ContentPart,
   RawDeltaMessageType,
   RawLLMParametersType,
   RawMessageType,
@@ -18,8 +19,8 @@ import { ToolDefinitionSchema } from '../tools/tool';
  */
 export abstract class ProviderTransport<TRawMessage> {
   constructor(
-    public apiMode: ApiModes,
-    public dialectResolver?: DialectResolver<
+    public readonly apiMode: ApiModes,
+    public readonly dialectResolver?: DialectResolver<
       TRawMessage,
       RawDeltaMessageType,
       RawLLMParametersType,
@@ -29,8 +30,8 @@ export abstract class ProviderTransport<TRawMessage> {
 
   /**
    * Convert the raw message to SessionMessage.
-   * 
-   * @param rawMsg 
+   *
+   * @param rawMsg
    */
   abstract convertFromRawMessage(rawMsg: TRawMessage): SessionMessage;
 
@@ -38,10 +39,10 @@ export abstract class ProviderTransport<TRawMessage> {
    * Convert the SessionMessage to raw message(s).
    * When the SessionMessage is tool message, and when it's converted to ChatCompletion/Response
    * message, because the API's tool result message only supports one tool result,
-   * so the SessionMessage will be converted to multiple raw messages, one for each tool result, 
-   * and if the message contains any other content besides the tool result, 
+   * so the SessionMessage will be converted to multiple raw messages, one for each tool result,
+   * and if the message contains any other content besides the tool result,
    * it will be converted to one more raw user message.
-   * @param msg 
+   * @param msg
    */
   abstract convertToRawMessage(msg: SessionMessage): TRawMessage | TRawMessage[];
 
@@ -165,22 +166,6 @@ export const ModelOptionsSchema = z.object({
 
 export type ModelOptions = z.infer<typeof ModelOptionsSchema>;
 
-export interface StreamCallbacks {
-  onTextChunk?: (delta: string, chunkFlag?: 'begin' | 'end') => Promise<void> | void;
-  onText?: (text: string) => Promise<void> | void;
-  onThinkingChunk?: (delta: string, chunkFlag?: 'begin' | 'end') => Promise<void> | void;
-  onThinking?: (text: string) => Promise<void> | void;
-  onToolUse?: (name: string, inputDelta: string) => Promise<void> | void;
-  /**
-   * Just provide a hook for the error handling. No matter what the hook does,
-   * the error will still be thrown to the upper level. So the hook is just for the side effect,
-   * e.g. logging the error, or send the error to some monitoring service.
-   * @param error
-   * @returns
-   */
-  onError?: (error: Error) => Promise<void> | void;
-}
-
 /**
  * Infer the API mode from the model options with the following priority:
  * 1. The apiMode specified in the options.
@@ -242,9 +227,16 @@ export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters, TRawR
    * Extract the data from the raw message or the raw delta when receiving the stream.
    * @param data the name of the data field.
    * @param delta the raw delta.
+   * @param streamDataExtractor the extracted data will be handled by streamDataExtractor
+   *                            to put the delta data to the accumulatedData. 
+   *                            And if the callbacks parameter is provided,
+   *                            emit the chunk data via the callbacks.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  abstract extractFromDelta(data: 'reasoning' | string, delta: TRawDelta): any;
+  abstract extractFromDelta<T extends Record<string, unknown>>(
+    data: 'reasoning' | string,
+    delta: TRawDelta,
+    streamDataExtractor: StreamDataExtractor<T>,
+  ): Promise<void>;
   /**
    * Extract the data from the raw message when receiving the final response.
    * @param data the name of the data field.
@@ -257,8 +249,7 @@ export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters, TRawR
       | 'cache_created_tokens'
       | 'stop_reason'
       | string,
-    response: TRawResponse,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    response: TRawResponse, // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): any;
 }
 
@@ -347,5 +338,63 @@ export class DialectResolverRegistry {
       }
     }
     return undefined;
+  }
+}
+
+export interface StreamCallbacks {
+  onChunk: (chunk: {
+    contentPartIndex: number;
+    contentPartChunk: ContentPart;
+    chunkIndex: number;
+  }) => Promise<void>;
+}
+
+export class StreamDataExtractor<T extends Record<string, unknown>> {
+  public readonly accumulatedData: T;
+  private readonly blocks: Map<
+    string,
+    { contentPartIndex: number; chunkIndex: number; data: unknown }
+  > = new Map();
+
+  constructor(
+    initialData: T,
+    private readonly callBacks?: StreamCallbacks,
+  ) {
+    this.accumulatedData = initialData;
+  }
+
+  /**
+   * 
+   * @param delta the key is used for merging existing block. when it's absent, means no merging.
+   * @param append define how to append the new block to the accumulated object.
+   * @param merge define how to merge the new delta with the existing block when the key is the same. 
+   *              if it's null, means no merging, just append as a new block (the key of the delta has to be undefined).
+   * @param toContentPart define how to convert the delta data to a ContentPart.
+   */
+  async accumulate<P>(
+    delta: { key?: string; value: P },
+    append: (accumulated: T, newData: P) => void,
+    merge: ((existing: P, newData: P, accumulated?: T) => void) | null,
+    toContentPart: (data: P) => ContentPart,
+  ): Promise<void> {
+    const key = delta.key ?? this.blocks.size.toString();
+    const value = delta.value;
+    const block = this.blocks.get(key) ?? {
+      contentPartIndex: this.blocks.size,
+      chunkIndex: 0,
+      data: value,
+    };
+    if (block.contentPartIndex === this.blocks.size) {
+      this.blocks.set(key, block);
+      append(this.accumulatedData, value);
+    } else if (merge) {
+      merge(block.data as P, value, this.accumulatedData);
+      block.chunkIndex = block.chunkIndex + 1;
+    }
+    await this.callBacks?.onChunk({
+      contentPartIndex: block.contentPartIndex,
+      contentPartChunk: toContentPart(value),
+      chunkIndex: block.chunkIndex,
+    });
   }
 }

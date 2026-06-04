@@ -1,9 +1,41 @@
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
 
+const ModelCapabilitiesSchema = z.union([
+  z.literal('reasoning'),
+  z.literal('vision'),
+  z.literal('image_generation'),
+  z.literal('audio_input'),
+  z.literal('audio_output'),
+  z.literal('video_input'),
+  z.literal('video_generation'),
+  z.literal('function_calling'),
+  z.literal('streaming'),
+  z.literal('json_mode'),
+  z.literal('web_search'),
+  z.literal('code_execution'),
+  z.literal('computer_use'),
+]);
+
+export type ModelCapabilities = z.infer<typeof ModelCapabilitiesSchema>;
+
+export const ModelProviderSchema = z.union([
+    z.literal('openai'),
+    z.literal('anthropic'),
+    z.literal('google'),
+    z.literal('deepseek'),
+    z.literal('alibaba'),
+    z.literal('azure'),
+    z.literal('openrouter'),
+    z.literal('ofoxai'),
+    z.string(),
+  ]);
+
+export type ModelProvider = z.infer<typeof ModelProviderSchema>;
+
 export const ModelInfoSchema = z.object({
   modelId: z.string(),
-  modelName: z.string(),
+  model: z.string(),
   displayName: z.string().optional(),
   description: z.string().optional(),
   baseUrl: z.string().optional(),
@@ -16,35 +48,8 @@ export const ModelInfoSchema = z.object({
       z.literal('bedrock'),
     ])
     .optional(),
-  vender: z.union([
-    z.literal('openai'),
-    z.literal('anthropic'),
-    z.literal('google'),
-    z.literal('deepseek'),
-    z.literal('alibaba'),
-    z.literal('azure'),
-    z.literal('openrouter'),
-    z.literal('ofoxai'),
-    z.string(),
-  ]),
-  capabilities: z
-    .array(
-      z.union([
-        z.literal('reasoning'),
-        z.literal('vision'),
-        z.literal('image_generation'),
-        z.literal('audio_input'),
-        z.literal('audio_output'),
-        z.literal('video_input'),
-        z.literal('video_generation'),
-        z.literal('function_calling'),
-        z.literal('streaming'),
-        z.literal('json_mode'),
-        z.literal('web_search'),
-        z.literal('code_execution'),
-      ]),
-    )
-    .optional(),
+  provider: ModelProviderSchema,
+  capabilities: z.array(ModelCapabilitiesSchema).optional(),
   contextWindow: z.number(),
   maxOutputTokens: z.number().optional(),
   pricing: z.object({
@@ -62,27 +67,25 @@ export const ModelInfoSchema = z.object({
 export type ModelInfo = z.infer<typeof ModelInfoSchema>;
 
 export class ModelRegistry {
-    private models: Map<string, ModelInfo> = new Map();
+  private models: Map<string, ModelInfo> = new Map();
 
-    registerModel(modelInfo: Omit<ModelInfo, 'modelId'>): void {
-        const modelId = nanoid(8);
-        this.models.set(modelId, { ...modelInfo, modelId });
-    }
+  registerModel(modelInfo: Omit<ModelInfo, 'modelId'>): void {
+    const modelId = nanoid(8);
+    this.models.set(modelId, { ...modelInfo, modelId });
+  }
 
-    getModel(modelId: string): ModelInfo | undefined {
-        return this.models.get(modelId);
-    }
+  getModel(modelId: string): ModelInfo | undefined {
+    return this.models.get(modelId);
+  }
 
-    listModels(): ModelInfo[] {
-        return Array.from(this.models.values());
-    }
+  listModels(): ModelInfo[] {
+    return Array.from(this.models.values());
+  }
 
-    getModels(modelName: string, baseUrl?: string): ModelInfo[] {
-        const matchedModels = Array.from(this.models.values()).filter(
-            (model) =>
-                model.modelName === modelName &&
-                (baseUrl ? model.baseUrl === baseUrl : true),
-        );
-        return matchedModels;
-    }
+  getModels(modelName: string, baseUrl?: string): ModelInfo[] {
+    const matchedModels = Array.from(this.models.values()).filter(
+      (model) => model.model === modelName && (baseUrl ? model.baseUrl === baseUrl : true),
+    );
+    return matchedModels;
+  }
 }

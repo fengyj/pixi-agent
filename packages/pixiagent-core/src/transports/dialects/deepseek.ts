@@ -5,8 +5,15 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionStreamParams,
 } from 'openai/resources/chat/completions';
-import { ApiModes, AnthropicApiMessage, ChatCompletionApiMessage, SessionMessage, ThinkingPart, ContentPart } from '../../message';
-import { ApiModeResolver, DialectResolver, ModelOptions } from '../base';
+import {
+  ApiModes,
+  AnthropicApiMessage,
+  ChatCompletionApiMessage,
+  SessionMessage,
+  ThinkingPart,
+  ContentPart,
+} from '../../message';
+import { ApiModeResolver, DialectResolver, ModelOptions, StreamDataExtractor } from '../base';
 import type {
   Message,
   MessageParam,
@@ -106,13 +113,45 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
     return { ...msg, content: ContentPart.concat([thinkingPart], msg.content) };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extractFromDelta(data: string, delta: ChatCompletionChunk.Choice.Delta): any {
+  async extractFromDelta<T extends Record<string, unknown>>(
+    data: string,
+    delta: ChatCompletionChunk.Choice.Delta,
+    streamDataExtractor: StreamDataExtractor<T>,
+  ): Promise<void> {
+    const getMessageObj = (acc: T): Record<string, unknown> | undefined => {
+      if (!('choices' in acc && Array.isArray(acc.choices) && acc.choices.length > 0))
+        return undefined;
+      if (!('message' in acc.choices[0] && typeof acc.choices[0].message === 'object'))
+        return undefined;
+      return acc.choices[0].message;
+    };
+
     if (data === 'reasoning') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (delta as any).reasoning_content ?? undefined;
+      if (
+        'reasoning_content' in delta &&
+        typeof delta.reasoning_content === 'string' &&
+        delta.reasoning_content.length > 0
+      ) {
+        const reasoningUpdater: (acc: T, newData: string) => void = (acc, newData) => {
+          const message = getMessageObj(acc);
+          if (!message) return;
+          if (!('reasoning_content' in message && typeof message.reasoning_content === 'string')) {
+            (message as Record<string, unknown> & { reasoning_content: string }).reasoning_content =
+              '';
+          }
+          message.reasoning_content += newData;
+        };
+        await streamDataExtractor.accumulate(
+          { key: 'reasoning_content', value: delta.reasoning_content },
+          reasoningUpdater,
+          (_existing: string, newData: string, accumulated?: T) => {
+            if (!accumulated) return;
+            reasoningUpdater(accumulated, newData);
+          },
+          (data) => ({ type: 'thinking' as const, content: data }),
+        );
+      }
     }
-    return undefined;
   }
 
   extractFromResponse(
@@ -221,7 +260,10 @@ export class DeepSeekAnthropicDialectResolver implements DialectResolver<
       signature: '',
     }));
 
-    const updatedInner: MessageParam = { ...base, content: [...thinkingBlocks, ...filteredContent] };
+    const updatedInner: MessageParam = {
+      ...base,
+      content: [...thinkingBlocks, ...filteredContent],
+    };
     return { ...rawMsg, content: updatedInner };
   }
 
@@ -230,10 +272,13 @@ export class DeepSeekAnthropicDialectResolver implements DialectResolver<
     return msg;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extractFromDelta(_data: string, _delta: RawContentBlockDelta): any {
+  extractFromDelta<T extends Record<string, unknown>>(
+    _data: string,
+    _delta: RawContentBlockDelta,
+    _streamDataExtractor: StreamDataExtractor<T>,
+  ): Promise<void> {
     // Not used: AnthropicTransport.generate handles all events natively via for-await.
-    return undefined;
+    return Promise.resolve();
   }
 
   extractFromResponse(

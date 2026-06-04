@@ -11,8 +11,8 @@
  */
 
 import { describe, it } from 'vitest';
-import { AnthropicTransport } from '@pixiagent/core/transports/anthropic';
-import { DeepSeekAnthropicDialectResolver } from '@pixiagent/core/transports/dialects/deepseek';
+import { AnthropicTransport } from '../../../../src/transports/anthropic';
+import { DeepSeekAnthropicDialectResolver } from '../../../../src/transports/dialects/deepseek';
 import { runStandardConversation } from '../helpers';
 
 const API_KEY = process.env.DEEPSEEK_API_KEY;

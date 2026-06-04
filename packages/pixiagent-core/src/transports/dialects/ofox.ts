@@ -14,7 +14,7 @@ import type {
   RawContentBlockDelta,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import { ApiModes, AnthropicApiMessage, ChatCompletionApiMessage, ResponseApiMessage, SessionMessage } from '../../message';
-import { ApiModeResolver, DialectResolver, ModelOptions } from '../base';
+import { ApiModeResolver, DialectResolver, ModelOptions, StreamDataExtractor } from '../base';
 
 const OFOX_OPENAI_BASES = ['https://api.ofox.ai/v1', 'https://api.ofox.io/v1'];
 const OFOX_CHAT_ENDPOINTS = [
@@ -94,9 +94,12 @@ export class OfoxChatDialectResolver implements DialectResolver<
     return msg;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extractFromDelta(_data: 'reasoning' | string, _delta: ChatCompletionChunk.Choice.Delta): any {
-    return undefined;
+  extractFromDelta<T extends Record<string, unknown>>(
+    _data: 'reasoning' | string, 
+    _delta: ChatCompletionChunk.Choice.Delta,
+    _streamDataExtractor: StreamDataExtractor<T>,
+  ): Promise<void> {
+    return Promise.resolve();
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -146,9 +149,12 @@ export class OfoxResponseDialectResolver implements DialectResolver<
     return msg;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extractFromDelta(_data: 'reasoning' | string, _delta: ResponseStreamEvent): any {
-    return undefined;
+  extractFromDelta<T extends Record<string, unknown>>(
+    _data: 'reasoning' | string, 
+    _delta: ResponseStreamEvent,
+    _streamDataExtractor: StreamDataExtractor<T>,
+  ): Promise<void> {
+    return Promise.resolve();
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -180,9 +186,12 @@ export class OfoxAnthropicDialectResolver implements DialectResolver<
     return msg;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extractFromDelta(_data: 'reasoning' | string, _delta: RawContentBlockDelta): any {
-    return undefined;
+  extractFromDelta<T extends Record<string, unknown>>(
+    _data: 'reasoning' | string, 
+    _delta: RawContentBlockDelta,
+    _streamDataExtractor: StreamDataExtractor<T>,
+  ): Promise<void> {
+    return Promise.resolve();
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

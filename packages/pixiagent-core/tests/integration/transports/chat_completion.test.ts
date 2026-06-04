@@ -9,7 +9,7 @@
  */
 
 import { describe, it } from 'vitest';
-import { ChatCompletionTransport } from '@pixiagent/core/transports/chat_completion';
+import { ChatCompletionTransport } from '../../../src/transports/chat_completion';
 import { runStandardConversation } from './helpers';
 
 const API_KEY = process.env.OFOXAI_API_KEY;

@@ -1,4 +1,5 @@
 import { InternalMessage, RawMessageType, RoleType, SessionMessage, UsageStats } from './message';
+import { ModelProvider } from './model';
 import { ModelOptions } from './transports';
 import { nanoid } from 'nanoid';
 
@@ -26,18 +27,18 @@ import { nanoid } from 'nanoid';
  */
 export interface Session {
   sessionId: string;
-  title?: string;
+  title: string | null;
   createdAt: string;
   updatedAt: string;
   /**
    * Marks the session's holder.
    */
-  holder?: string;
+  holder: string | null;
   /**
    * The parent session id if this session is forked from another session.
    * It is used for tracking the session lineage, and can be used for UI to display the session tree structure.
    */
-  parentSessionId?: string;
+  parentSessionId: string | null;
   /**
    * The messages no matter in which threads.
    */
@@ -68,6 +69,40 @@ export interface Session {
    * we may save the last message has been saved, so just nedd save the new messages next time.
    */
   metadata?: Record<string, string>;
+  /**
+   * The media sources used in the session.
+   *
+   * For the media which are not attached as base64 in the message.
+   * If the media is attached as URL, the URL could be a temporary presigned URL
+   * with an expiration time, so the info can be used to refresh the URL when needed.
+   * And if the media is uploaded to a provider, it can be expired, or user can use another provider
+   * to continue the conversation, so we can replace the mediaSource in the message.
+   */
+  mediaSources?: Record<string, MediaSourceInfo>;
+}
+
+export interface MediaSourceInfo {
+  mediaSourceId: string;
+  /** the location can be a file path, or a URL. Which can be used for the agent to get the file */
+  location: string;
+  fileName?: string;
+  mimeType?: string;
+  size?: number;
+  /** The url can be used by LLM providers to access the media */
+  url?: string;
+  urlExpireAt?: number;
+  /** Records of the uploads. Key is the provider */
+  uploaded?: Record<
+    string,
+    {
+      /** The file ID returned by the provider */
+      fileId: string;
+      /** The name of the provider. Like 'openai' */
+      provider: ModelProvider;
+      /** The expiration time of the uploaded file */
+      expireAt?: number;
+    }
+  >;
 }
 
 export interface SessionThreadInfo {
@@ -78,7 +113,7 @@ export interface SessionThreadInfo {
   /**
    * The title of the thread.
    */
-  title?: string;
+  title: string | null;
   /**
    * There are two kinds of thread, one is branch style, the other is annotation style.
    * - Branch: the thread is forked from a particular message, and the messages before that
@@ -88,7 +123,13 @@ export interface SessionThreadInfo {
    *               will not be included in the thread. This style is usually used for the sidecar question,
    *               and in this style, the rootMessageId is the message id of the particular message.
    */
-  rootMessageId?: string;
+  rootMessageId: string | null;
+  /**
+   * A mark to indicate that the thread is forked from a particular message. 
+   * It can be used to track the thread lineage. And when user wants to delete a message,
+   * we can know if there are any threads should be marked as deleted.
+   */
+  forkedFromMessageId: string | null;
   /**
    * The head message id of the thread.
    * When there is no messages in the session, it's undefined.
@@ -103,6 +144,8 @@ export interface SessionThreadInfo {
    * The thread level usage
    */
   totalUsage: UsageStats;
+  /** Indicates how many LLM invocations have occurred in this thread */
+  totalTurns: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -114,9 +157,9 @@ export interface SessionThreadInfo {
  */
 export class SessionThread {
   constructor(
-    public session: Session,
-    public threadInfo: SessionThreadInfo,
-    public threadMessages: InternalMessage[],
+    public readonly session: Session,
+    public readonly threadInfo: SessionThreadInfo,
+    public readonly threadMessages: InternalMessage[],
   ) {}
 
   addMessage(
@@ -168,8 +211,11 @@ export class SessionThread {
     this.session.updatedAt = now;
     this.threadInfo.headMessageId = newMessage.internalMessageId;
     this.threadInfo.updatedAt = now;
-    this.threadInfo.totalUsage = UsageStats.sum(this.threadInfo.totalUsage, usage);
-    this.session.totalUsage = UsageStats.sum(this.session.totalUsage, usage);
+    if (newMessage.role === 'assistant') {
+      this.threadInfo.totalTurns += 1;
+      this.threadInfo.totalUsage = UsageStats.sum(this.threadInfo.totalUsage, usage);
+      this.session.totalUsage = UsageStats.sum(this.session.totalUsage, usage);
+    }
     return newMessage;
   }
 }
@@ -256,6 +302,7 @@ function getSeqId(id: string, num: number, digits = 2): string {
  */
 function createSession(options: {
   modelOptions: ModelOptions;
+  title?: string;
   holder?: string;
   parentSessionId?: string;
 }): Session {
@@ -265,14 +312,15 @@ function createSession(options: {
     sessionId,
     createdAt: now,
     updatedAt: now,
-    holder: options.holder,
-    parentSessionId: options.parentSessionId,
+    holder: options.holder ?? null,
+    parentSessionId: options.parentSessionId ?? null,
+    title: options.title ?? null,
     messages: [],
     threads: [],
     defaultThread: getSeqId(sessionId, 1),
     totalUsage: UsageStats.empty(),
   };
-  forkThread(session, undefined, false, options.modelOptions);
+  forkThread(session, false, options.modelOptions);
   return session;
 }
 
@@ -332,17 +380,20 @@ function getThreadsFromSession(
  */
 function forkThread(
   session: Session,
-  fromMessageId: string | undefined,
   includeHistory: boolean,
   modelOptions: ModelOptions,
+  fromMessageId?: string,
 ): SessionThread {
   const threadId = getSeqId(session.sessionId, session.threads.length + 1);
   const threadInfo: SessionThreadInfo = {
     threadId: threadId,
-    rootMessageId: includeHistory ? undefined : fromMessageId,
+    rootMessageId: includeHistory ? null : (fromMessageId ?? null),
+    forkedFromMessageId: includeHistory ? null : (fromMessageId ?? null),
     headMessageId: fromMessageId,
     modelOptions: modelOptions,
+    title: null,
     totalUsage: UsageStats.empty(),
+    totalTurns: 0,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

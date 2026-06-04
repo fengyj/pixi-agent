@@ -17,8 +17,8 @@
  */
 
 import { describe, it } from 'vitest';
-import { ChatCompletionTransport } from '@pixiagent/core/transports/chat_completion';
-import { OpenRouterChatDialectResolver } from '@pixiagent/core/transports/dialects/openrouter';
+import { ChatCompletionTransport } from '../../../../src/transports/chat_completion';
+import { OpenRouterChatDialectResolver } from '../../../../src/transports/dialects/openrouter';
 import { runStandardConversation } from '../helpers';
 
 const API_KEY = process.env.OPENROUTER_API_KEY;

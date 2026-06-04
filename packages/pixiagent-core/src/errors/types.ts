@@ -32,6 +32,12 @@ export class AgentInterruptedError extends PixiAgentError {
   }
 }
 
+export class AgentConcurrentExecutionError extends PixiAgentError {
+  constructor() {
+    super('The agent is already running and does not allow concurrent execute calls.');
+  }
+}
+
 /**
  * Base error for all retriable failures in PixiAgent.
  *
@@ -62,14 +68,14 @@ export class PixiAgentTimeoutError extends PixiAgentRetriableError {
  */
 export class ModelRequestTimeoutError extends PixiAgentTimeoutError {
   constructor(
-    public readonly provider: string,
+    public readonly baseUrl: string,
     timeoutMs?: number,
     cause?: unknown,
   ) {
     super(
       timeoutMs !== undefined
-        ? `Model request to ${provider} timed out after ${timeoutMs}ms.`
-        : `Model request to ${provider} timed out.`,
+        ? `Model request to ${baseUrl} timed out after ${timeoutMs}ms.`
+        : `Model request to ${baseUrl} timed out.`,
       timeoutMs,
       cause,
     );
