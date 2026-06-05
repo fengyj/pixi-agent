@@ -26,21 +26,19 @@ export enum ApiModes {
 const RoleTypeSchema = z.enum(['assistant', 'user', 'tool']);
 export type RoleType = z.infer<typeof RoleTypeSchema>;
 
-export interface UsageStats {
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  cacheReadTokens?: number;
-  cacheCreatedTokens?: number;
-  reasoningTokens?: number;
-  inputTokenDetails?: {
-    [name: string]: number;
-  };
-  outputTokenDetails?: {
-    [name: string]: number;
-  };
+const UsageStatsSchema = z.object({
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  totalTokens: z.number(),
+  cacheReadTokens: z.number().optional(),
+  cacheCreatedTokens: z.number().optional(),
+  reasoningTokens: z.number().optional(),
+  inputTokenDetails: z.record(z.string(),z.number()).optional(),
+  outputTokenDetails: z.record(z.string(), z.number()).optional(),
   // todo: add price field
-}
+});
+
+export type UsageStats = z.infer<typeof UsageStatsSchema>;
 
 function mergeTokenDetails(
   a?: UsageStats['inputTokenDetails'],
@@ -410,6 +408,26 @@ export const ContentPart = {
   createProviderToolCallArguments: createProviderToolCallArguments,
 };
 
+export enum ModelStopReasons {
+  STOP = 'stop',
+  TOOL_CALL = 'tool_call',
+  MAX_TOKENS = 'max_tokens',
+  REFUSAL = 'refusal',
+  CANCELLED = 'cancelled',
+  TIMEOUT = 'timeout',
+  OTHERS = 'others',
+}
+
+const ModelResponseInfoSchema = z.object({
+  responseId: z.string(),
+  responseModel: z.string(),
+  stopReason: z.enum(ModelStopReasons).optional(),
+  refusal: z.string().optional(),
+  usage: UsageStatsSchema.optional(),
+});
+
+export type ModelResponseInfo = z.infer<typeof ModelResponseInfoSchema>;
+
 /**
  * An API neutral message format. Used for UI, and as an intermediate data for the conversion
  * between the different API modes or dialects.
@@ -419,6 +437,8 @@ export const SessionMessageSchema = z.object({
   type: z.literal('session_message'),
   role: RoleTypeSchema,
   content: z.union([z.string(), z.array(ContentPartSchema)]),
+  /** Only available when role is 'assistant' */
+  modelResponseInfo: ModelResponseInfoSchema.optional(),
   /**
    * The name of the role, which is optional.
    * It can be used to indicate the name of the assistant or user.
@@ -438,6 +458,8 @@ export type ResponseApiMessage = {
   type: 'response_api_message';
   role: RoleType;
   content: Array<ResponseInputItem | ResponseOutputItem>;
+  /** Only available when role is 'assistant' */
+  modelResponseInfo?: ModelResponseInfo,
   metadata?: Record<string, unknown>;
 };
 
@@ -446,6 +468,8 @@ export type ChatCompletionApiMessage = {
   type: 'chat_completion_api_message';
   role: RoleType;
   content: ChatCompletionMessageParam;
+  /** Only available when role is 'assistant' */
+  modelResponseInfo?: ModelResponseInfo,
   metadata?: Record<string, unknown>;
 };
 
@@ -454,6 +478,8 @@ export type AnthropicApiMessage = {
   type: 'anthropic_api_message';
   role: RoleType;
   content: MessageParam;
+  /** Only available when role is 'assistant' */
+  modelResponseInfo?: ModelResponseInfo,
   metadata?: Record<string, unknown>;
 };
 
@@ -549,7 +575,7 @@ export interface InternalMessage {
   /**
    * The message happened before this one. Excepts the first message, others should have this value.
    */
-  previousMessageId?: string;
+  previousMessageId: string | null;
   usage?: UsageStats;
   createdAt: string;
   completedAt?: string;

@@ -250,7 +250,7 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
       ) {
         const propName = 'reasoning' in delta ? 'reasoning' : 'reasoning_content';
         await streamDataExtractor.accumulate(
-          { key: propName, value: (delta as Record<string, unknown>)[propName] as string },
+          { value: (delta as Record<string, unknown>)[propName] as string },
           (acc, newData) => {
             const message = getMessageObj(acc);
             if (!message) return;

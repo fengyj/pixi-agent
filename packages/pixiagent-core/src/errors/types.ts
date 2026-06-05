@@ -1,41 +1,42 @@
+
+export interface PixiAgentErrorOptions {
+  code?: string;
+  cause?: unknown;
+  meta?: Record<string, unknown>;
+}
+
 /**
  * Base class for all PixiAgent errors.
  * Ensures `name` is set correctly so OTel `error.type` and `instanceof` checks work reliably.
  */
 export class PixiAgentError extends Error {
-  constructor(message: string) {
+  public readonly meta?: Record<string, unknown>;
+  public readonly code?: string;
+  public readonly cause?: unknown;
+  constructor(message: string, options?: PixiAgentErrorOptions) {
     super(message);
-    this.name = this.constructor.name;
     // Maintains proper prototype chain in transpiled ES5 output
     Object.setPrototypeOf(this, new.target.prototype);
-  }
-}
+    this.name = this.constructor.name;
+    this.code = options?.code;
+    this.cause = options?.cause;
+    this.meta = options?.meta;
 
-// ─── Agent lifecycle errors ───────────────────────────────────────────────────
-
-/**
- * Thrown when the agent has exceeded its configured maximum iteration limit.
- * Indicates the agent loop ran out of budget, not that an error occurred.
- */
-export class MaxIterationsExceededError extends PixiAgentError {
-  constructor(public readonly maxIterations: number) {
-    super(`The agent has reached the maximum number of iterations (${maxIterations}).`);
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor);
+    }
   }
-}
 
-/**
- * Thrown (or used as the abort reason) when the agent execution is intentionally interrupted.
- */
-export class AgentInterruptedError extends PixiAgentError {
-  constructor(public readonly reason: string = 'User interrupted') {
-    super(`Agent execution was interrupted: ${reason}`);
-  }
-}
-
-export class AgentConcurrentExecutionError extends PixiAgentError {
-  constructor() {
-    super('The agent is already running and does not allow concurrent execute calls.');
-  }
+  toJSON() {
+    return {
+      name: this.name,
+      message: this.message,
+      code: this.code,
+      meta: this.meta,
+      cause: this.cause instanceof Error ? this.cause.message : this.cause,
+      stack: this.stack,
+    };
+  } 
 }
 
 /**
@@ -45,68 +46,10 @@ export class AgentConcurrentExecutionError extends PixiAgentError {
  * e.g. timeout, temporary upstream overload, or short-lived network failures.
  */
 export class PixiAgentRetriableError extends PixiAgentError {
-  constructor(message: string, cause?: unknown) {
-    super(message);
-    if (cause !== undefined) {
-      (this as Error & { cause?: unknown }).cause = cause;
-    }
-  }
-}
-
-/**
- * Base error for timeout failures in PixiAgent.
- * This is distinct from user-triggered cancellation (interrupt/abort).
- */
-export class PixiAgentTimeoutError extends PixiAgentRetriableError {
-  constructor(message: string, public readonly timeoutMs?: number, cause?: unknown) {
-    super(message, cause);
-  }
-}
-
-/**
- * Thrown when an upstream model provider request times out.
- */
-export class ModelRequestTimeoutError extends PixiAgentTimeoutError {
-  constructor(
-    public readonly baseUrl: string,
-    timeoutMs?: number,
-    cause?: unknown,
-  ) {
-    super(
-      timeoutMs !== undefined
-        ? `Model request to ${baseUrl} timed out after ${timeoutMs}ms.`
-        : `Model request to ${baseUrl} timed out.`,
-      timeoutMs,
-      cause,
-    );
-  }
-}
-
-// ─── Configuration errors ─────────────────────────────────────────────────────
-
-/**
- * Thrown when the API mode and base URL cannot be resolved for the given model/options.
- * This is a configuration error and should not occur in normal operation.
- */
-export class ApiModeResolutionError extends PixiAgentError {
-  constructor(
-    public readonly model: string,
-    public readonly baseUrl: string | undefined,
-  ) {
-    super(
-      `Cannot resolve the API mode for model "${model}"${baseUrl ? ` with baseUrl "${baseUrl}"` : ''}.`,
-    );
-  }
-}
-
-// ─── Transport / message conversion errors ────────────────────────────────────
-
-/**
- * Thrown when a message with an unsupported or unexpected role is encountered
- * during transport conversion. Indicates a programming error in the caller.
- */
-export class InvalidMessageError extends PixiAgentError {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: PixiAgentErrorOptions) {
+    super(message, {
+      ...options,
+      code: options?.code ?? 'RETRIABLE_ERROR',
+    });
   }
 }

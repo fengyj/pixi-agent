@@ -2,7 +2,6 @@ import {
   DialectResolver,
   ModelOptions,
   ModelRequestOptions,
-  ModelResponse,
   ProviderTransport,
   StreamCallbacks,
   StreamDataExtractor,
@@ -38,13 +37,12 @@ import {
   ToolResultPart,
   ContentPart,
   CitationWebLocation,
+  ModelStopReasons,
 } from '../message';
 import {
-  AgentInterruptedError,
-  InvalidMessageError,
-  ModelRequestTimeoutError,
-} from '../errors/types';
-import { isLikelyAbortError, isLikelyTimeoutError } from '../errors/guards';
+  PixiAgentErrorBuilder,
+  ErrorGuards,
+} from '../errors';
 import { OpenAI } from 'openai/client';
 
 export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApiMessage> {
@@ -181,6 +179,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
       role: 'assistant',
       content: parts,
       name: msg.name,
+      modelResponseInfo: rawMsg.modelResponseInfo,
       metadata: rawMsg.metadata,
     } as SessionMessage;
   }
@@ -227,7 +226,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
   private getFromToolMessageParam(rawMsg: ChatCompletionApiMessage): SessionMessage {
     const msg = rawMsg.content as ChatCompletionToolMessageParam;
     if (!msg.content || (typeof msg.content !== 'string' && msg.content.length === 0)) {
-      throw new InvalidMessageError('Tool message must have content');
+      throw PixiAgentErrorBuilder.invalidMessage('Tool message must have content', 'tool');
     }
 
     const toolResultParts = [] as ToolResultPart[];
@@ -517,7 +516,9 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
         case 'function':
           return this.getFromFunctionMessageParam(rawMsg);
         default:
-          throw new InvalidMessageError(`Unsupported message role: ${rawMsg.content.role}`);
+          throw PixiAgentErrorBuilder.invalidMessage(
+            `Unsupported message role: ${rawMsg.content.role}`,
+            );
       }
     })();
     return this.dialectResolver ? this.dialectResolver.manipulateMessage(message, rawMsg) : message;
@@ -525,7 +526,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
 
   private getAssistantMessageParam(msg: SessionMessage): ChatCompletionAssistantMessageParam {
     if (msg.role !== 'assistant') {
-      throw new InvalidMessageError(`Message role must be assistant, but got ${msg.role}`);
+      throw PixiAgentErrorBuilder.invalidMessage(`Message role must be assistant, but got ${msg.role}`);
     }
 
     const toolCalls =
@@ -579,10 +580,10 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
 
   private getUserMessageParam(msg: SessionMessage): ChatCompletionUserMessageParam {
     if (msg.role !== 'user') {
-      throw new InvalidMessageError(`Message role must be user, but got ${msg.role}`);
+      throw PixiAgentErrorBuilder.invalidMessage(`Message role must be user, but got ${msg.role}`);
     }
     if (!msg.content || (typeof msg.content !== 'string' && msg.content.length === 0)) {
-      throw new InvalidMessageError('User message must have content');
+      throw PixiAgentErrorBuilder.invalidMessage('User message must have content', 'user');
     }
 
     if (typeof msg.content === 'string') {
@@ -608,12 +609,13 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
     msg: SessionMessage,
   ): ChatCompletionMessageParam | ChatCompletionMessageParam[] {
     if (msg.role !== 'tool') {
-      throw new InvalidMessageError(`Message role must be tool, but got ${msg.role}`);
+      throw PixiAgentErrorBuilder.invalidMessage(`Message role must be tool, but got ${msg.role}`);
     }
 
     if (!msg.content || typeof msg.content === 'string' || msg.content.length === 0) {
-      throw new InvalidMessageError(
-        'Tool message content must be a non-empty array of content parts.',
+      throw PixiAgentErrorBuilder.invalidMessage(
+        'Tool message must have content that is a non-empty array.',
+        'tool',
       );
     }
 
@@ -623,8 +625,9 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
     const otherParts = msg.content.filter((part) => part.type !== 'tool_result');
 
     if (toolResults.length === 0) {
-      throw new InvalidMessageError(
+      throw PixiAgentErrorBuilder.invalidMessage(
         'Tool message content must have at least one tool result part.',
+        'tool',
       );
     }
 
@@ -685,8 +688,6 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
           return this.getUserMessageParam(msg);
         case 'tool':
           return this.getToolMessageParam(msg);
-        default:
-          throw new InvalidMessageError(`Unsupported message role: ${msg.role}`);
       }
     })();
 
@@ -701,6 +702,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
               ? 'user'
               : inner.role,
         content: inner,
+        modelResponseInfo: msg.modelResponseInfo,
         metadata: msg.metadata,
       };
       return this.dialectResolver
@@ -734,53 +736,53 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
 
   private buildModelResponse(
     response: ChatCompletion,
-  ): ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>> {
+  ): Omit<ChatCompletionApiMessage, 'messageId'> {
     const responseMessage = response.choices[0]?.message;
-    const wrappedMessage: Omit<ChatCompletionApiMessage, 'messageId'> = {
+    return {
       type: 'chat_completion_api_message',
       role: 'assistant',
       content: responseMessage,
+      modelResponseInfo: {
+        responseId: response.id,
+        responseModel: response.model,
+        stopReason: this.getStopReason(
+          this.dialectResolver?.extractFromResponse('stop_reason', response) ??
+            response.choices[0]?.finish_reason,
+        ),
+        refusal:
+          responseMessage.role === 'assistant' && 'refusal' in responseMessage
+            ? ((responseMessage as ChatCompletionAssistantMessageParam).refusal ?? undefined)
+            : undefined,
+        usage: response.usage
+          ? {
+              inputTokens: response.usage.prompt_tokens,
+              outputTokens: response.usage.completion_tokens,
+              totalTokens: response.usage.total_tokens,
+              reasoningTokens:
+                this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ??
+                response.usage.completion_tokens_details?.reasoning_tokens ??
+                undefined,
+              cacheReadTokens:
+                this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
+                response.usage.prompt_tokens_details?.cached_tokens ??
+                undefined,
+              cacheCreatedTokens:
+                this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
+                undefined,
+              inputTokenDetails: response.usage.prompt_tokens_details
+                ? { ...response.usage.prompt_tokens_details }
+                : undefined,
+              outputTokenDetails: response.usage.completion_tokens_details
+                ? { ...response.usage.completion_tokens_details }
+                : undefined,
+            }
+          : undefined,
+      },
       metadata: {
         pixiagent_response_id: response.id,
         pixiagent_response_finish_reason: response.choices[0]?.finish_reason,
       },
     };
-    return {
-      responseId: response.id,
-      responseMessage: wrappedMessage,
-      responseModel: response.model,
-      stopReason:
-        this.dialectResolver?.extractFromResponse('stop_reason', response) ??
-        this.getStopReason(response.choices[0]?.finish_reason),
-      refusal:
-        responseMessage.role === 'assistant' && 'refusal' in responseMessage
-          ? ((responseMessage as ChatCompletionAssistantMessageParam).refusal ?? undefined)
-          : undefined,
-      usage: response.usage
-        ? {
-            inputTokens: response.usage.prompt_tokens,
-            outputTokens: response.usage.completion_tokens,
-            totalTokens: response.usage.total_tokens,
-            reasoningTokens:
-              this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ??
-              response.usage.completion_tokens_details?.reasoning_tokens ??
-              undefined,
-            cacheReadTokens:
-              this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
-              response.usage.prompt_tokens_details?.cached_tokens ??
-              undefined,
-            cacheCreatedTokens:
-              this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
-              undefined,
-            inputTokenDetails: response.usage.prompt_tokens_details
-              ? { ...response.usage.prompt_tokens_details }
-              : undefined,
-            outputTokenDetails: response.usage.completion_tokens_details
-              ? { ...response.usage.completion_tokens_details }
-              : undefined,
-          }
-        : undefined,
-    } as ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>;
   }
 
   async generate(
@@ -788,7 +790,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
     messages: Array<ChatCompletionApiMessage>,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<Omit<ChatCompletionApiMessage, 'messageId'>>> {
+  ): Promise<Omit<ChatCompletionApiMessage, 'messageId'>> {
     const params = this.getChatCompletionStreamParams(options, messages);
     try {
       const stream = await this.client.chat.completions.create(
@@ -801,17 +803,21 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
           model: undefined as ChatCompletion['model'] | undefined,
           created: Date.now() / 1000,
           usage: undefined as ChatCompletion['usage'] | undefined,
-          choices: [{
-            index: 0,
-            finish_reason: 'stop' as ChatCompletion.Choice['finish_reason'],
-            logprobs: null,
-            message: {
-              role: 'assistant',
-              content: null as Array<ChatCompletionContentPartText | ChatCompletionContentPartRefusal> | null,
-              tool_calls: undefined as Array<ChatCompletionMessageFunctionToolCall> | undefined,
-              audio: null,
+          choices: [
+            {
+              index: 0,
+              finish_reason: 'stop' as ChatCompletion.Choice['finish_reason'],
+              logprobs: null,
+              message: {
+                role: 'assistant',
+                content: null as Array<
+                  ChatCompletionContentPartText | ChatCompletionContentPartRefusal
+                > | null,
+                tool_calls: undefined as Array<ChatCompletionMessageFunctionToolCall> | undefined,
+                audio: null,
+              },
             },
-          }],
+          ],
         },
         callbacks,
       );
@@ -834,11 +840,11 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
           streamDataExtractor.accumulatedData.choices[0].finish_reason = choice.finish_reason;
         }
 
-        if(this.dialectResolver) {
+        if (this.dialectResolver) {
           await this.dialectResolver.extractFromDelta(
             'reasoning',
             choice.delta,
-            streamDataExtractor
+            streamDataExtractor,
           );
         }
 
@@ -848,7 +854,7 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
               value: { type: 'text', text: choice.delta.content } as ChatCompletionContentPartText,
             },
             (accumulated, newData) => {
-              if(accumulated.choices[0].message.content === null) {
+              if (accumulated.choices[0].message.content === null) {
                 accumulated.choices[0].message.content = [];
               }
               accumulated.choices[0].message.content.push(newData);
@@ -929,42 +935,50 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
   }
 
   private wrapRequestError(error: unknown, requestOptions?: ModelRequestOptions): unknown {
+    if(ErrorGuards.isPixiAgentError(error)) {
+      return error;
+    }
     const signal = requestOptions?.signal;
     if (signal?.aborted) {
       const reason = signal.reason;
-      if (reason instanceof AgentInterruptedError) {
+      if (ErrorGuards.isPixiAgentError(reason)) {
         return reason;
       }
       if (typeof reason === 'string' && reason.length > 0) {
-        return new AgentInterruptedError(reason);
+        return PixiAgentErrorBuilder.agentInterrupted(reason);
       }
       if (reason instanceof Error && reason.message) {
-        return new AgentInterruptedError(reason.message);
+        return PixiAgentErrorBuilder.agentInterrupted(reason.message);
       }
-      return new AgentInterruptedError();
+      return PixiAgentErrorBuilder.agentInterrupted('Abort signal triggered');
     }
-    if (isLikelyAbortError(error)) {
-      return new AgentInterruptedError();
+    if (ErrorGuards.isLikelyAbortError(error)) {
+      return PixiAgentErrorBuilder.agentInterrupted((error as Error).message);
     }
-    if (!isLikelyTimeoutError(error)) {
+    if (!ErrorGuards.isLikelyTimeoutError(error)) {
       return error;
     }
-    return new ModelRequestTimeoutError(this.client.baseURL, requestOptions?.timeout, error);
+    return PixiAgentErrorBuilder.modelRequestTimeout(
+      this.client.baseURL ?? ChatCompletionTransport.OFFICIAL_BASE_URL,
+      requestOptions?.timeout,
+      undefined,
+      error,
+    );
   }
 
-  private getStopReason(finishReason: string): string {
+  private getStopReason(finishReason: string): ModelStopReasons {
     switch (finishReason) {
       case 'stop':
-        return 'stop';
+        return ModelStopReasons.STOP;
       case 'tool_calls':
       case 'function_call':
-        return 'tool_call';
+        return ModelStopReasons.TOOL_CALL;
       case 'length':
-        return 'max_tokens';
+        return ModelStopReasons.MAX_TOKENS;
       case 'content_filter':
-        return 'refusal';
+        return ModelStopReasons.REFUSAL;
       default:
-        return finishReason;
+        return ModelStopReasons.OTHERS;
     }
   }
 

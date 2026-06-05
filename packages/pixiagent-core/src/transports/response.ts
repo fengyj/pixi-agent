@@ -7,7 +7,6 @@ import type {
   ResponseOutputItem,
   ResponseOutputMessage,
   ResponseReasoningItem,
-  ResponseStreamEvent,
   ToolChoiceOptions,
   ResponseInputContent,
   ResponseOutputText,
@@ -30,6 +29,7 @@ import type {
   ResponseApplyPatchToolCall,
   ResponseFunctionShellToolCall,
   EasyInputMessage,
+  ResponseErrorEvent,
 } from 'openai/resources/responses/responses';
 import {
   ApiModes,
@@ -48,19 +48,16 @@ import {
   ToolResultPart,
   ResponseApiMessage,
   ThinkingPart,
+  ModelStopReasons,
 } from '../message';
-import {
-  AgentInterruptedError,
-  ModelRequestTimeoutError,
-} from '../errors/types';
-import { isLikelyAbortError, isLikelyTimeoutError } from '../errors/guards';
+import { PixiAgentErrorBuilder, ErrorGuards } from '../errors';
 import {
   DialectResolver,
   ModelOptions,
   ModelRequestOptions,
-  ModelResponse,
   ProviderTransport,
   StreamCallbacks,
+  StreamDataExtractor,
 } from './base';
 import { randomUUID } from 'crypto';
 
@@ -99,13 +96,14 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
 
   convertFromRawMessage(rawMsg: ResponseApiMessage): SessionMessage {
     const parts = rawMsg.content.flatMap(ConvertHelper.toContentParts);
-    const message: SessionMessage =  {
+    const message: SessionMessage = {
       messageId: rawMsg.messageId,
       type: 'session_message',
       role: rawMsg.role,
       content: parts,
+      modelResponseInfo: rawMsg.modelResponseInfo,
       metadata: rawMsg.metadata,
-    } ;
+    };
     return this.dialectResolver ? this.dialectResolver.manipulateMessage(message, rawMsg) : message;
   }
 
@@ -116,6 +114,7 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
       type: 'response_api_message',
       role: msg.role,
       content: items,
+      modelResponseInfo: msg.modelResponseInfo,
       metadata: msg.metadata,
     };
 
@@ -160,7 +159,7 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
     }
   }
 
-  private getStopReason(response: Response): string {
+  private getStopReason(response: Response): ModelStopReasons {
     const hasToolCall = response.output.some(
       (item) =>
         item.type === 'function_call' ||
@@ -178,25 +177,28 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
         item.type === 'mcp_approval_request',
     );
     if (hasToolCall) {
-      return 'tool_call';
+      return ModelStopReasons.TOOL_CALL;
     }
 
     if (response.status === 'cancelled') {
-      return 'cancelled';
+      return ModelStopReasons.CANCELLED;
     }
 
     if (response.status === 'incomplete') {
       switch (response.incomplete_details?.reason) {
         case 'max_output_tokens':
-          return 'max_tokens';
+          return ModelStopReasons.MAX_TOKENS;
         case 'content_filter':
-          return 'refusal';
+          return ModelStopReasons.REFUSAL;
         default:
-          return 'max_tokens';
+          return ModelStopReasons.MAX_TOKENS;
       }
     }
+    if (response.status === 'failed') {
+      return ModelStopReasons.CANCELLED;
+    }
 
-    return response.status ?? 'unknown';
+    return ModelStopReasons.OTHERS;
   }
 
   private getResponseMessage(response: Response): Omit<ResponseApiMessage, 'messageId'> {
@@ -218,12 +220,33 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
       type: 'response_api_message',
       role: 'assistant',
       content: response.output,
+      modelResponseInfo: {
+        responseId: response.id,
+        responseModel: response.model,
+        stopReason: this.getStopReason(response),
+        refusal: this.getRefusal(response.output),
+        usage: response.usage
+          ? {
+              inputTokens: response.usage.input_tokens,
+              outputTokens: response.usage.output_tokens,
+              totalTokens: response.usage.total_tokens,
+              reasoningTokens: response.usage.output_tokens_details?.reasoning_tokens,
+              cacheReadTokens: response.usage.input_tokens_details?.cached_tokens,
+              inputTokenDetails: response.usage.input_tokens_details
+                ? { ...response.usage.input_tokens_details }
+                : undefined,
+              outputTokenDetails: response.usage.output_tokens_details
+                ? { ...response.usage.output_tokens_details }
+                : undefined,
+            }
+          : undefined,
+      },
       metadata,
     };
   }
 
-  private getRefusal(responseMessage: Omit<ResponseApiMessage, 'messageId'>): string | undefined {
-    for (const item of responseMessage.content) {
+  private getRefusal(content: Array<ResponseInputItem | ResponseOutputItem>): string | undefined {
+    for (const item of content) {
       if (item.type === 'message' && item.role === 'assistant' && Array.isArray(item.content)) {
         const refusal = item.content.find((content) => content.type === 'refusal');
         if (refusal?.type === 'refusal') {
@@ -303,190 +326,480 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
     return streamRequestOptions;
   }
 
-  private async generateStream(
-    params: ResponseCreateParamsStreaming,
-    callbacks?: StreamCallbacks,
-    requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<Omit<ResponseApiMessage, 'messageId'>>> {
-    let textBuffer = '';
-    let sawTextDelta = false;
-    let thinkingBuffer = '';
-    let sawThinkingDelta = false;
-
-    const stream = await this.client.responses.create(
-      { ...params, stream: true },
-      this.getStreamRequestOptions(requestOptions),
-    );
-
-    let response: Response | undefined;
-    for await (const event of stream) {
-      const type = (event as { type?: string }).type;
-
-      if (type === 'response.keep_alive') {
-        continue;
-      }
-
-      switch (type) {
-        case 'response.reasoning_text.delta': {
-          const deltaEvent = event as Extract<
-            ResponseStreamEvent,
-            { type: 'response.reasoning_text.delta' }
-          >;
-          sawThinkingDelta = true;
-          thinkingBuffer += deltaEvent.delta;
-          callbacks?.onThinkingChunk?.(deltaEvent.delta);
-          break;
-        }
-        case 'response.reasoning_summary_text.delta': {
-          const deltaEvent = event as Extract<
-            ResponseStreamEvent,
-            { type: 'response.reasoning_summary_text.delta' }
-          >;
-          sawThinkingDelta = true;
-          thinkingBuffer += deltaEvent.delta;
-          callbacks?.onThinkingChunk?.(deltaEvent.delta);
-          break;
-        }
-        case 'response.reasoning_text.done': {
-          const doneEvent = event as Extract<
-            ResponseStreamEvent,
-            { type: 'response.reasoning_text.done' }
-          >;
-          if (!sawThinkingDelta && doneEvent.text) {
-            thinkingBuffer += doneEvent.text;
-            callbacks?.onThinkingChunk?.(doneEvent.text);
-          }
-          break;
-        }
-        case 'response.reasoning_summary_text.done': {
-          const doneEvent = event as Extract<
-            ResponseStreamEvent,
-            { type: 'response.reasoning_summary_text.done' }
-          >;
-          if (!sawThinkingDelta && doneEvent.text) {
-            thinkingBuffer += doneEvent.text;
-            callbacks?.onThinkingChunk?.(doneEvent.text);
-          }
-          break;
-        }
-        case 'response.output_text.delta': {
-          const deltaEvent = event as Extract<
-            ResponseStreamEvent,
-            { type: 'response.output_text.delta' }
-          >;
-          sawTextDelta = true;
-          textBuffer += deltaEvent.delta;
-          callbacks?.onTextChunk?.(deltaEvent.delta);
-          break;
-        }
-        case 'response.output_text.done': {
-          const doneEvent = event as Extract<
-            ResponseStreamEvent,
-            { type: 'response.output_text.done' }
-          >;
-          if (!sawTextDelta) {
-            callbacks?.onTextChunk?.(doneEvent.text);
-            textBuffer += doneEvent.text;
-          }
-          break;
-        }
-        case 'response.function_call_arguments.done': {
-          const toolEvent = event as Extract<
-            ResponseStreamEvent,
-            { type: 'response.function_call_arguments.done' }
-          >;
-          // onToolUse is removed from StreamCallbacks.
-          break;
-        }
-        case 'error': {
-          const errEvent = event as Extract<ResponseStreamEvent, { type: 'error' }>;
-          callbacks?.onError?.(new Error(errEvent.message ?? 'Unknown response stream error'));
-          break;
-        }
-        case 'response.completed':
-        case 'response.incomplete':
-        case 'response.failed': {
-          response = (event as { response: Response }).response;
-          break;
-        }
-        default:
-          break;
-      }
-    }
-
-    if (!response) {
-      throw new Error('Response stream ended without a terminal response event');
-    }
-
-    if (!sawTextDelta && response.output_text) {
-      callbacks?.onTextChunk?.(response.output_text);
-      textBuffer = response.output_text;
-    }
-
-    const responseMessage = this.getResponseMessage(response);
-    return {
-      responseId: response.id,
-      responseMessage,
-      responseModel: response.model,
-      stopReason: this.getStopReason(response),
-      refusal: this.getRefusal(responseMessage),
-      usage: response.usage
-        ? {
-            inputTokens: response.usage.input_tokens,
-            outputTokens: response.usage.output_tokens,
-            totalTokens: response.usage.total_tokens,
-            reasoningTokens: response.usage.output_tokens_details?.reasoning_tokens,
-            cacheReadTokens: response.usage.input_tokens_details?.cached_tokens,
-            inputTokenDetails: response.usage.input_tokens_details
-              ? { ...response.usage.input_tokens_details }
-              : undefined,
-            outputTokenDetails: response.usage.output_tokens_details
-              ? { ...response.usage.output_tokens_details }
-              : undefined,
-          }
-        : undefined,
-    };
-  }
-
   async generate(
     options: ModelOptions,
     messages: Array<ResponseApiMessage>,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<Omit<ResponseApiMessage, 'messageId'>>> {
+  ): Promise<Omit<ResponseApiMessage, 'messageId'>> {
     const params = this.buildParams(options, messages);
 
     try {
-      return await this.generateStream(params, callbacks, requestOptions);
+      const stream = await this.client.responses.create(
+        { ...params, stream: true },
+        this.getStreamRequestOptions(requestOptions),
+      );
+
+      const streamDataExtractor = new StreamDataExtractor(
+        {
+          content: Array<ResponseInputItem | ResponseOutputItem>(),
+          response: undefined as Response | undefined,
+        },
+        callbacks,
+      );
+
+      for await (const event of stream) {
+        switch (event.type) {
+          case 'response.created':
+          case 'response.queued':
+          case 'response.in_progress':
+            break;
+          case 'error':
+            throw this.extractResponseError(event as ResponseErrorEvent);
+          case 'response.completed':
+          case 'response.incomplete':
+          case 'response.failed': {
+            streamDataExtractor.accumulatedData.response = event.response;
+            break;
+          }
+          case 'response.output_item.added': {
+            streamDataExtractor.accumulate(
+              { key: `output_item_${event.output_index}`, value: event.item },
+              (accumulated, data) => {
+                if (accumulated.content.length !== event.output_index) {
+                  throw PixiAgentErrorBuilder.modelResponseError(
+                    `Received output item for non-existing index ${event.output_index}`,
+                    this.client.baseURL,
+                    'invalid_stream_event',
+                    { event },
+                  );
+                }
+                accumulated.content.push(data);
+              },
+              (_existing, _newData) => {
+                // should be always new item in this event.
+              },
+              (delta) => {
+                switch (delta.type) {
+                  case 'function_call':
+                    return ConvertHelper.toContentPart(delta);
+                  default:
+                    return null;
+                }
+              },
+            );
+            break;
+          }
+          case 'response.output_item.done': {
+            streamDataExtractor.accumulate(
+              { key: `output_item_${event.output_index}`, value: event.item },
+              (_accumulated, _data) => {},
+              (existing, newData) => {
+                if (streamDataExtractor.accumulatedData.content.length <= event.output_index) {
+                  throw PixiAgentErrorBuilder.modelResponseError(
+                    `Received output item done event for non-existing index ${event.output_index}`,
+                    this.client.baseURL,
+                    'invalid_stream_event',
+                    { event },
+                  );
+                }
+                const item = streamDataExtractor.accumulatedData.content[event.output_index];
+                if (existing !== item) {
+                  throw PixiAgentErrorBuilder.modelResponseError(
+                    `Data mismatch for output item at index ${event.output_index} between added and done events`,
+                    this.client.baseURL,
+                    'invalid_stream_event',
+                    { event },
+                  );
+                }
+                streamDataExtractor.accumulatedData.content[event.output_index] = newData;
+              },
+              (delta) => {
+                switch (event.item.type) {
+                  case 'function_call':
+                  case 'message':
+                  case 'reasoning':
+                    return null;
+                  default:
+                    return ConvertHelper.toContentPart(
+                      delta as Exclude<
+                        ResponseOutputItem,
+                        ResponseOutputMessage | ResponseFunctionToolCall
+                      >,
+                    );
+                }
+              },
+            );
+
+            break;
+          }
+          case 'response.content_part.added': {
+            // set item to the message.content
+            streamDataExtractor.accumulate(
+              {
+                key: `output_item_${event.output_index}_content_${event.content_index}`,
+                value: event.part,
+              },
+              (accumulated, data) => {
+                const content =
+                  accumulated.content.length > event.output_index
+                    ? accumulated.content[event.output_index]
+                    : null;
+                if (content == null) {
+                  throw PixiAgentErrorBuilder.modelResponseError(
+                    `Received content part for non-existing output item at index ${event.output_index}`,
+                    this.client.baseURL,
+                    'invalid_stream_event',
+                    { event },
+                  );
+                }
+                switch (content.type) {
+                  case 'message': {
+                    if (data.type !== 'output_text' && data.type !== 'refusal') {
+                      throw PixiAgentErrorBuilder.modelResponseError(
+                        `Expected content part of type output_text or refusal for message item, but got ${data.type}`,
+                        this.client.baseURL,
+                        'invalid_stream_event',
+                        { event },
+                      );
+                    }
+                    const message = accumulated.content[
+                      event.output_index
+                    ] as ResponseOutputMessage;
+                    if (message.content.length !== event.content_index) {
+                      throw PixiAgentErrorBuilder.modelResponseError(
+                        `Received out-of-order content part with content_index ${event.content_index} for message item, expected content_index ${message.content.length}`,
+                        this.client.baseURL,
+                        'invalid_stream_event',
+                        { event },
+                      );
+                    }
+                    message.content.push(data);
+                    break;
+                  }
+                  case 'reasoning': {
+                    if (data.type !== 'reasoning_text') {
+                      throw PixiAgentErrorBuilder.modelResponseError(
+                        `Expected content part of type reasoning_text for reasoning item, but got ${data.type}`,
+                        this.client.baseURL,
+                        'invalid_stream_event',
+                        { event },
+                      );
+                    }
+                    const reasoningItem = accumulated.content[
+                      event.output_index
+                    ] as ResponseReasoningItem;
+                    if (!reasoningItem.content) {
+                      reasoningItem.content = [];
+                    }
+                    reasoningItem.content.push(data);
+                    break;
+                  }
+                  default: {
+                    throw PixiAgentErrorBuilder.modelResponseError(
+                      `Received content part for unsupported item type ${content.type}`,
+                      this.client.baseURL,
+                      'invalid_stream_event',
+                      { event },
+                    );
+                  }
+                }
+              },
+              (_existing, _newData) => {
+                // no data to merge in this event
+              },
+              (delta) => {
+                switch (delta.type) {
+                  case 'output_text': {
+                    return delta.text === '' ? null : { type: 'text', text: delta.text };
+                  }
+                  case 'refusal':
+                    return delta.refusal === '' ? null : { type: 'refusal', reason: delta.refusal };
+                  case 'reasoning_text':
+                    return delta.text === '' ? null : { type: 'thinking', content: delta.text };
+                }
+              },
+            );
+            break;
+          }
+          case 'response.content_part.done':
+            break;
+          case 'response.output_text.delta': {
+            streamDataExtractor.accumulate(
+              {
+                key: `output_item_${event.output_index}_content_${event.content_index}`,
+                value: {
+                  type: 'output_text',
+                  text: event.delta,
+                } as ResponseOutputText,
+              },
+              (_accumulated, _data) => {}, // no data to append
+              (existing, newData) => {
+                existing.text += newData.text;
+              },
+              (delta) => delta.text === '' ? null : { type: 'text', text: delta.text },
+            );
+            break;
+          }
+          case 'response.output_text.annotation.added': {
+            streamDataExtractor.accumulate(
+              {
+                key: `output_item_${event.output_index}_content_${event.content_index}`,
+                value: {
+                  type: 'output_text',
+                  text: '',
+                  annotations: [event.annotation],
+                } as ResponseOutputText,
+              },
+              (_accumulated, _data) => {}, // no data to append
+              (existing, newData) => {
+                if (!existing.annotations) {
+                  existing.annotations = [];
+                }
+                existing.annotations.push(...newData.annotations);
+              },
+              (delta) => ConvertHelper.toContentPart(delta),
+            );
+            break;
+          }
+          case 'response.output_text.done':
+            // no need to do anything as the final text should have been accumulated in the delta events, but we can use this event to trigger any callbacks if needed.
+            break;
+
+          case 'response.refusal.delta': {
+            streamDataExtractor.accumulate(
+              {
+                key: `output_item_${event.output_index}_content_${event.content_index}`,
+                value: {
+                  type: 'refusal',
+                  refusal: event.delta,
+                } as ResponseOutputRefusal,
+              },
+              (_accumulated, _data) => {}, // no data to append
+              (existing, newData) => {
+                existing.refusal += newData.refusal;
+              },
+              (delta) => delta.refusal === '' ? null : ConvertHelper.toContentPart(delta),
+            );
+            break;
+          }
+          case 'response.refusal.done':
+            break;
+          case 'response.reasoning_text.delta': {
+            streamDataExtractor.accumulate(
+              {
+                key: `output_item_${event.output_index}_content_${event.content_index}`,
+                value: {
+                  type: 'reasoning_text',
+                  text: event.delta,
+                },
+              },
+              (_accumulated, _data) => {}, // Item is added `response.content_part.added`
+              (existing, newData) => {
+                existing.text += newData.text;
+              },
+              (delta) => delta.text === '' ? null : { type: 'thinking', content: delta.text },
+            );
+            break;
+          }
+          case 'response.reasoning_text.done':
+            break;
+          case 'response.reasoning_summary_part.added': {
+            streamDataExtractor.accumulate(
+              {
+                key: `output_item_${event.output_index}_summary_${event.summary_index}`,
+                value: event.part,
+              },
+              (accumulated, data) => {
+                if (accumulated.content.length <= event.output_index) {
+                  throw PixiAgentErrorBuilder.modelResponseError(
+                    `Received reasoning summary part for non-existing output item at index ${event.output_index}`,
+                    this.client.baseURL,
+                    'invalid_stream_event',
+                    { event },
+                  );
+                }
+                const content = accumulated.content[event.output_index];
+                if (content.type !== 'reasoning') {
+                  throw PixiAgentErrorBuilder.modelResponseError(
+                    `Received reasoning summary part for output item at index ${event.output_index} which is not a reasoning item`,
+                    this.client.baseURL,
+                    'invalid_stream_event',
+                    { event },
+                  );
+                }
+                if (!content.summary) {
+                  content.summary = [];
+                }
+                if (content.summary.length !== event.summary_index) {
+                  throw PixiAgentErrorBuilder.modelResponseError(
+                    `Received out-of-order reasoning summary part with summary_index ${event.summary_index} for output item at index ${event.output_index}, expected summary_index ${content.summary.length}`,
+                    this.client.baseURL,
+                    'invalid_stream_event',
+                    { event },
+                  );
+                }
+                content.summary.push(data);
+              },
+              (_existing, _newData) => {}, // no data to merge in this event
+              (delta) => {
+                if (delta.text === '') {
+                  return null;
+                }
+                return { type: 'thinking', content: delta.text };
+              },
+            );
+            break;
+          }
+          case 'response.reasoning_summary_text.delta': {
+            streamDataExtractor.accumulate(
+              {
+                key: `output_item_${event.output_index}_summary_${event.summary_index}`,
+                value: {
+                  type: 'summary_text',
+                  text: event.delta,
+                },
+              },
+              (_accumulated, _data) => {}, // summary item is added in `response.reasoning_summary_part.added`
+              (existing, newData) => {
+                if (!existing.text) {
+                  existing.text = '';
+                }
+                existing.text += newData.text;
+              },
+              (delta) => delta.text === '' ? null : { type: 'thinking', content: delta.text },
+            );
+            break;
+          }
+          case 'response.reasoning_summary_text.done':
+          case 'response.reasoning_summary_part.done':
+            break;
+          case 'response.function_call_arguments.delta': {
+            streamDataExtractor.accumulate(
+              {
+                key: `output_item_${event.output_index}`,
+                value: {
+                  arguments: event.delta,
+                  call_id: '',
+                  name: '',
+                  type: 'function_call',
+                } as ResponseFunctionToolCall,
+              },
+              (_accumulated, _data) => {},
+              (existing, newData) => {
+                existing.arguments += newData.arguments;
+                newData.call_id = existing.call_id;
+                newData.name = existing.name;
+              },
+              (delta) => delta.arguments === '' ? null : ConvertHelper.toContentPart(delta),
+            );
+            break;
+          }
+          case 'response.function_call_arguments.done':
+            break;
+          case 'response.audio.delta':
+          case 'response.audio.done':
+          case 'response.audio.transcript.delta':
+          case 'response.audio.transcript.done':
+          case 'response.code_interpreter_call.completed':
+          case 'response.image_generation_call.completed':
+          case 'response.code_interpreter_call.in_progress':
+          case 'response.code_interpreter_call.interpreting':
+          case 'response.code_interpreter_call_code.delta':
+          case 'response.code_interpreter_call_code.done':
+          case 'response.image_generation_call.in_progress':
+          case 'response.custom_tool_call_input.delta':
+          case 'response.custom_tool_call_input.done':
+          case 'response.file_search_call.completed':
+          case 'response.file_search_call.in_progress':
+          case 'response.web_search_call.completed':
+          case 'response.file_search_call.searching':
+          case 'response.image_generation_call.generating':
+          case 'response.image_generation_call.partial_image':
+          case 'response.mcp_call.completed':
+          case 'response.mcp_call.failed':
+          case 'response.mcp_call.in_progress':
+          case 'response.mcp_call_arguments.delta':
+          case 'response.mcp_call_arguments.done':
+          case 'response.mcp_list_tools.completed':
+          case 'response.mcp_list_tools.failed':
+          case 'response.mcp_list_tools.in_progress':
+          case 'response.web_search_call.in_progress':
+          case 'response.web_search_call.searching':
+            break;
+        }
+      }
+      const response = streamDataExtractor.accumulatedData.response;
+      if (!response) {
+        throw PixiAgentErrorBuilder.modelResponseError(
+          'Response stream ended without a terminal response event',
+          this.client.baseURL,
+          'invalid_stream_event',
+        );
+      }
+
+      return this.getResponseMessage(response);
     } catch (error) {
       throw this.wrapRequestError(error, requestOptions);
     }
   }
 
+  private extractResponseError(event: ResponseErrorEvent): Error {
+    switch (event.code) {
+      case 'rate_limit_exceeded':
+      case 'vector_store_timeout':
+        return PixiAgentErrorBuilder.modelRequestRetriableError(
+          event.message ?? 'Request failed with retriable error',
+          this.client.baseURL,
+          event.code,
+        );
+      case 'server_error':
+        return PixiAgentErrorBuilder.modelResponseError(
+          event.message ?? 'Server error during model response',
+          this.client.baseURL,
+          event.code,
+          event,
+        );
+      default:
+        return PixiAgentErrorBuilder.invalidMessage(
+          `Error event received from response stream: ${event.message ?? 'Unknown error'}`,
+          'assistant',
+          event.code ?? undefined,
+          event,
+        );
+    }
+  }
+
   private wrapRequestError(error: unknown, requestOptions?: ModelRequestOptions): unknown {
+    if (ErrorGuards.isPixiAgentError(error)) {
+      return error;
+    }
     const signal = requestOptions?.signal;
     if (signal?.aborted) {
       const reason = signal.reason;
-      if (reason instanceof AgentInterruptedError) {
+      if (ErrorGuards.isPixiAgentError(reason)) {
         return reason;
       }
       if (typeof reason === 'string' && reason.length > 0) {
-        return new AgentInterruptedError(reason);
+        return PixiAgentErrorBuilder.agentInterrupted(reason);
       }
       if (reason instanceof Error && reason.message) {
-        return new AgentInterruptedError(reason.message);
+        return PixiAgentErrorBuilder.agentInterrupted(reason.message);
       }
-      return new AgentInterruptedError();
+      return PixiAgentErrorBuilder.agentInterrupted('Abort signal triggered');
     }
-
-    if (isLikelyAbortError(error)) {
-      return new AgentInterruptedError();
+    if (ErrorGuards.isLikelyAbortError(error)) {
+      return PixiAgentErrorBuilder.agentInterrupted((error as Error).message);
     }
-    if (!isLikelyTimeoutError(error)) {
+    if (!ErrorGuards.isLikelyTimeoutError(error)) {
       return error;
     }
-
-    return new ModelRequestTimeoutError(this.client.baseURL, requestOptions?.timeout, error);
+    return PixiAgentErrorBuilder.modelRequestTimeout(
+      this.client.baseURL ?? ResponseTransport.OFFICIAL_BASE_URL,
+      requestOptions?.timeout,
+      undefined,
+      error,
+    );
   }
 }
 
@@ -647,9 +960,7 @@ const ResponseContentPartHelper = {
     };
   },
 
-  fromResponseInputImage(
-    item: ResponseInputImage | ResponseInputImageContent,
-  ): ImagePart | null {
+  fromResponseInputImage(item: ResponseInputImage | ResponseInputImageContent): ImagePart | null {
     if (item.image_url) {
       return {
         type: 'image',
@@ -670,9 +981,7 @@ const ResponseContentPartHelper = {
     return null;
   },
 
-  fromResponseInputFile(
-    item: ResponseInputFile | ResponseInputFileContent,
-  ): DocumentPart | null {
+  fromResponseInputFile(item: ResponseInputFile | ResponseInputFileContent): DocumentPart | null {
     if (item.file_id) {
       return {
         type: 'document',
@@ -1178,9 +1487,28 @@ const ContentPartResponseHelper = {
 };
 
 export const ConvertHelper = {
-  toContentParts: ResponseContentPartHelper.toContentPartsFromResponseItem,
-  toContentPart: ResponseContentPartHelper.fromResponseObject,
-  toResponseItems: ContentPartResponseHelper.toResponseItems,
+  toContentParts: (item: ResponseInputItem | ResponseOutputItem): ContentPart[] =>
+    ResponseContentPartHelper.toContentPartsFromResponseItem(item),
+  toContentPart: (
+    item:
+      | Exclude<
+          ResponseInputItem,
+          EasyInputMessage | ResponseInputItem.Message | ResponseOutputMessage
+        >
+      | Exclude<ResponseOutputItem, ResponseOutputMessage>
+      | ResponseOutputText
+      | ResponseInputText
+      | ResponseOutputRefusal
+      | ResponseInputImage
+      | ResponseInputImageContent
+      | ResponseInputFile
+      | ResponseInputFileContent,
+  ): ContentPart | null => ResponseContentPartHelper.fromResponseObject(item),
+  toResponseItems: (
+    role: RoleType,
+    content: string | ContentPart[],
+  ): Array<ResponseInputItem | ResponseOutputItem> =>
+    ContentPartResponseHelper.toResponseItems(role, content),
 };
 
 function assertNever(x: never): never {

@@ -295,7 +295,7 @@ export class SessionFileSystemRepository implements SessionRepository {
 
     const messagesById = new Map(messages.map((message) => [message.internalMessageId, message]));
     const result: InternalMessage[] = [];
-    let currentMessageId: string | undefined = thread.headMessageId;
+    let currentMessageId: string | null = thread.headMessageId;
 
     while (currentMessageId) {
       const message = messagesById.get(currentMessageId);

@@ -7,7 +7,6 @@ import type {
 import type {
   ResponseInputItem,
   ResponseOutputItem,
-  ResponseOutputMessage,
 } from 'openai/resources/responses/responses';
 
 describe('ResponseTransport conversion', () => {
@@ -80,7 +79,7 @@ describe('ResponseTransport conversion', () => {
       content: [
         {
           type: 'function_call',
-          id: 'resp-2_call-2',
+          id: 'call-2',
           call_id: 'call-2',
           name: 'run',
           arguments: '{"command":"date"}',
@@ -88,7 +87,6 @@ describe('ResponseTransport conversion', () => {
         },
         {
           type: 'message',
-          id: 'resp-2',
           role: 'assistant',
           status: 'completed',
           content: [{ type: 'output_text', text: 'done', annotations: [] }],

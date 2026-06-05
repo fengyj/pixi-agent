@@ -7,7 +7,6 @@ import {
   RawMessageType,
   RawResponseType,
   SessionMessage,
-  UsageStats,
 } from '../message';
 import { ToolDefinitionSchema } from '../tools/tool';
 
@@ -51,22 +50,13 @@ export abstract class ProviderTransport<TRawMessage> {
     messages: TRawMessage[],
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<Omit<TRawMessage, 'messageId'>>>;
+  ): Promise<Omit<TRawMessage, 'messageId'>>;
 }
 
 export interface ModelRequestOptions {
   signal?: AbortSignal | undefined | null;
   timeout?: number;
   maxRetries?: number;
-}
-
-export interface ModelResponse<TRawMessage> {
-  responseId: string;
-  responseMessage: TRawMessage;
-  responseModel: string;
-  stopReason?: 'stop' | 'tool_call' | 'max_tokens' | 'refusal' | 'cancelled' | 'timeout' | string;
-  refusal?: string;
-  usage?: UsageStats;
 }
 
 export const ModelOptionsSchema = z.object({
@@ -347,14 +337,34 @@ export interface StreamCallbacks {
     contentPartChunk: ContentPart;
     chunkIndex: number;
   }) => Promise<void>;
+
+  onFinish: (msg: SessionMessage) => Promise<void>;
 }
 
+/**
+ * The StreamDataExtractor is used for accumulating the data from the stream and 
+ * emit the chunk data via the callbacks.
+ * 
+ * The class cannot handle the logic of when a content part is completed, because
+ * a delta data could contain more than one content part data, we don't know the orders of them,
+ * so there is no way to determine when a content part is completed. For example,
+ * the content part 7 is contained in the previous delta data, and it also is in the current one.
+ * But there is another content part 8 in it, and we process it before the content part 7.
+ * If need to resolve this issue, have to check the content part if exists in the next delta data.
+ * This will make the logic much more complicated.
+ */
 export class StreamDataExtractor<T extends Record<string, unknown>> {
   public readonly accumulatedData: T;
+  /**
+   * The contentPartIndex means the nth content part emitted in the stream.
+   * The chunkIndex means the nth chunk of the content part emitted.
+   */
   private readonly blocks: Map<
     string,
     { contentPartIndex: number; chunkIndex: number; data: unknown }
   > = new Map();
+  private blockCount: number = 0;
+  private contentPartCount: number = 0;
 
   constructor(
     initialData: T,
@@ -369,7 +379,7 @@ export class StreamDataExtractor<T extends Record<string, unknown>> {
    * @param append define how to append the new block to the accumulated object.
    * @param merge define how to merge the new delta with the existing block when the key is the same.
    *              if it's null, means no merging, just append as a new block (the key of the delta has to be undefined).
-   * @param toContentPart define how to convert the delta data to a ContentPart. 
+   * @param toContentPart define how to convert the delta data to a ContentPart.
    *                      If the result is null, the chunk won't be emitted via the callbacks.
    */
   async accumulate<P>(
@@ -378,23 +388,37 @@ export class StreamDataExtractor<T extends Record<string, unknown>> {
     merge: ((existing: P, newData: P, accumulated?: T) => void) | null,
     toContentPart: (data: P) => ContentPart | null,
   ): Promise<void> {
-    const key = delta.key ?? this.blocks.size.toString();
+    const singleChunkBlock = !delta.key;
+    if (singleChunkBlock && merge !== null) {
+      throw new Error('When the delta has no key, the merge function has to be null.');
+    }
+    if (!singleChunkBlock && !merge) {
+      throw new Error('When the delta has a key, the merge function cannot be null.');
+    }
+    const key = delta.key ?? `single_chunk_block_${this.blockCount}`;
     const value = delta.value;
+    const isNewBlock = !this.blocks.has(key);
     const block = this.blocks.get(key) ?? {
-      contentPartIndex: this.blocks.size,
-      chunkIndex: 0,
+      contentPartIndex: -1,
+      chunkIndex: -1,
       data: value,
     };
-    if (block.contentPartIndex === this.blocks.size) {
+
+    if (isNewBlock) {
+      this.blockCount++;
       this.blocks.set(key, block);
       append(this.accumulatedData, value);
-    } else if (merge) {
-      merge(block.data as P, value, this.accumulatedData);
-      block.chunkIndex = block.chunkIndex + 1;
+    } else if (!singleChunkBlock) {
+      merge!(block.data as P, value, this.accumulatedData);
     }
     if (this.callBacks) {
+      const isNewContentPart = block.chunkIndex === -1;
       const contentPart = toContentPart(value);
       if (contentPart) {
+        if (isNewContentPart) {
+          block.contentPartIndex = this.contentPartCount++;
+        }
+        block.chunkIndex++;
         await this.callBacks.onChunk({
           contentPartIndex: block.contentPartIndex,
           contentPartChunk: contentPart,

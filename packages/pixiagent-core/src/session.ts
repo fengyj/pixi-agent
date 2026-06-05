@@ -201,7 +201,7 @@ export class SessionThread {
       baseUrl: modelOptions.baseUrl,
       rawMessage: rawMsg,
       role: role,
-      previousMessageId: lastMessageId,
+      previousMessageId: lastMessageId ?? null,
       createdAt: createdAt,
       completedAt: now,
       usage: usage,
@@ -357,7 +357,7 @@ function getThreadsFromSession(
       currentMessageId =
         thread.rootMessageId && thread.rootMessageId === message.internalMessageId
           ? undefined
-          : message.previousMessageId;
+          : message.previousMessageId ?? undefined;
     }
 
     const sessionThread = new SessionThread(session, thread, threadMessages);

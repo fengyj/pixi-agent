@@ -1,11 +1,7 @@
 export {
   PixiAgentError,
   PixiAgentRetriableError,
-  PixiAgentTimeoutError,
-  MaxIterationsExceededError,
-  AgentInterruptedError,
-  AgentConcurrentExecutionError,
-  ModelRequestTimeoutError,
-  ApiModeResolutionError,
-  InvalidMessageError,
 } from './types';
+
+export { PixiAgentErrorBuilder } from './helpers';
+export { ErrorGuards } from './guards';

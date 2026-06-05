@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { OpenRouterChatDialectResolver } from './openrouter';
 import { DeepSeekChatDialectResolver } from './deepseek';
 import { ChatCompletionApiMessage, SessionMessage } from '../../message';
+import { StreamDataExtractor } from '../base';
 
 describe('chat dialect message manipulation', () => {
   it('OpenRouter keeps assistant text when adding thinking part', () => {
@@ -69,29 +70,41 @@ describe('chat dialect message manipulation', () => {
     ]);
   });
 
-  it('OpenRouter extracts reasoning.text delta', () => {
+  it('OpenRouter extracts reasoning.text delta', async () => {
     const resolver = new OpenRouterChatDialectResolver();
+    const streamDataExtractor = new StreamDataExtractor({
+      choices: [{ message: {} as Record<string, unknown> }],
+    });
 
     /* eslint-disable @typescript-eslint/no-explicit-any */
     const delta = {
-      reasoning_details: [{ type: 'reasoning.text', text: 'step one. ' }],
+      reasoning_details: [{ index: 0, type: 'reasoning.text', text: 'step one. ' }],
     } as any;
     /* eslint-enable @typescript-eslint/no-explicit-any */
 
-    const out = resolver.extractFromDelta('reasoning', delta);
-    expect(out).toBe('step one. ');
+    await resolver.extractFromDelta('reasoning', delta, streamDataExtractor);
+    expect(
+      (streamDataExtractor.accumulatedData.choices[0].message as { reasoning_details?: Array<{ text?: string }> })
+        .reasoning_details?.[0]?.text,
+    ).toBe('step one. ');
   });
 
-  it('OpenRouter extracts reasoning.summary delta', () => {
+  it('OpenRouter extracts reasoning.summary delta', async () => {
     const resolver = new OpenRouterChatDialectResolver();
+    const streamDataExtractor = new StreamDataExtractor({
+      choices: [{ message: {} as Record<string, unknown> }],
+    });
 
     /* eslint-disable @typescript-eslint/no-explicit-any */
     const delta = {
-      reasoning_details: [{ type: 'reasoning.summary', summary: 'summary chunk. ' }],
+      reasoning_details: [{ index: 0, type: 'reasoning.summary', summary: 'summary chunk. ' }],
     } as any;
     /* eslint-enable @typescript-eslint/no-explicit-any */
 
-    const out = resolver.extractFromDelta('reasoning', delta);
-    expect(out).toBe('summary chunk. ');
+    await resolver.extractFromDelta('reasoning', delta, streamDataExtractor);
+    expect(
+      (streamDataExtractor.accumulatedData.choices[0].message as { reasoning_details?: Array<{ summary?: string }> })
+        .reasoning_details?.[0]?.summary,
+    ).toBe('summary chunk. ');
   });
 });

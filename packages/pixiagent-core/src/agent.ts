@@ -15,6 +15,7 @@ import { ProviderTransport, ModelOptions } from './transports';
 import {
   ContentPart,
   InternalMessage,
+  ModelStopReasons,
   RawMessageType,
   SessionMessage,
   ToolCallPart,
@@ -24,15 +25,12 @@ import {
 import { ToolRegistry } from './tools/tool';
 import type { AgentSpan } from './observation';
 import {
-  AgentConcurrentExecutionError,
-  AgentInterruptedError,
-  ApiModeResolutionError,
-  InvalidMessageError,
-} from './errors/types';
-import { ModelResponse } from './transports/base';
+  PixiAgentErrorBuilder,
+  ErrorGuards,
+} from './errors';
 
 import * as Observation from './observation';
-import { AgentEventEmitter } from './event';
+import { AgentEventEmitter, AgentMessageChunkEventCallbacks } from './event';
 const trace = Observation.getTracer('pixiagent.agent');
 const { withSpan, retry } = Observation.Helpers;
 
@@ -43,6 +41,7 @@ export class PixiAgent {
   private transportCache = new Map<string, ProviderTransport<RawMessageType>>();
   private abortController = new AbortController();
   private isRunning = false;
+  private eventEmitter?: AgentEventEmitter;
   // todo: add event listener as parameter to expose the events.
   constructor(
     public readonly sessionThread: SessionThread,
@@ -57,6 +56,7 @@ export class PixiAgent {
       sessionId: sessionThread.session.sessionId,
       threadId: sessionThread.threadInfo.threadId,
     });
+    this.eventEmitter = options?.eventEmitter;
   }
 
   /**
@@ -73,7 +73,7 @@ export class PixiAgent {
   ): Promise<PixiAgentExecutionResult> {
     modelOptions = PixiAgent.resolveApiModeAndBaseUrl(modelOptions);
     if (this.isRunning) {
-      throw new AgentConcurrentExecutionError();
+      throw PixiAgentErrorBuilder.agentConcurrentExecution();
     }
 
     this.isRunning = true;
@@ -86,11 +86,9 @@ export class PixiAgent {
           const transport = this.getTransport(modelOptions);
           const requestInternalMsg = this.enqueueRequestMessage(modelOptions, input);
 
-          this.options?.eventEmitter?.emit({
-            eventType: 'execution_state_changed',
-            newState: 'before_model_request',
-            message: requestInternalMsg.rawMessage as SessionMessage,
-          });
+          await this.eventEmitter?.executionState.beforeModelRequest(
+            requestInternalMsg.rawMessage as SessionMessage,
+          );
 
           userMessageId = requestInternalMsg.internalMessageId;
           const historyMessages = this.getHistoryMessagesForTransport(modelOptions, transport);
@@ -105,15 +103,13 @@ export class PixiAgent {
             this.logger.info('The agent execution is completed');
           }
 
-          this.options?.eventEmitter?.emit({
-            eventType: 'execution_state_changed',
-            newState: stopReason === 'end_turn' ? 'completed' : 'incomplete',
-            stopReason: stopReason,
-            usage: UsageStats.isEmpty(usage) ? undefined : usage,
-          });
+          await this.eventEmitter?.executionState.executionFinished(
+            stopReason,
+            UsageStats.isEmpty(usage) ? undefined : usage,
+          );
 
           return {
-            stopReason,
+            stopReason: stopReason,
             usage: UsageStats.isEmpty(usage) ? undefined : usage,
             userMessageId: userMessageId,
             metadata: this.getExecutionMetadata(),
@@ -131,13 +127,18 @@ export class PixiAgent {
           { cancel_reason: this.abortController.signal.reason },
           'The agent execution is interrupted',
         );
-        
-          this.options?.eventEmitter?.emit({
-            eventType: 'execution_state_changed',
-            newState: 'incomplete',
-            stopReason: 'cancelled',
-            usage: UsageStats.isEmpty(usage) ? undefined : usage,
-            error: error as Error,
+
+        await this.eventEmitter?.executionState
+          .executionFinished(
+            'cancelled',
+            UsageStats.isEmpty(usage) ? undefined : usage,
+            error as Error,
+          )
+          .catch((emitError) => {
+            this.logger.error(
+              { error: emitError },
+              'An error occurred while emitting executionFinished event',
+            );
           });
 
         return {
@@ -148,6 +149,18 @@ export class PixiAgent {
         };
       }
       this.logger.error({ error }, 'An error occurred during execution');
+      await this.eventEmitter?.executionState
+        .executionFinished(
+          'cancelled',
+          UsageStats.isEmpty(usage) ? undefined : usage,
+          error as Error,
+        )
+        .catch((emitError) => {
+          this.logger.error(
+            { error: emitError },
+            'An error occurred while emitting executionFinished event',
+          );
+        });
       throw error;
     } finally {
       this.isRunning = false;
@@ -155,7 +168,7 @@ export class PixiAgent {
     }
   }
 
-  public interrupt(reason?: string): void {
+  public async interrupt(reason?: string): Promise<void> {
     if (!this.isRunning) {
       this.logger.debug('The agent is not running, no need to interrupt');
       return;
@@ -166,31 +179,37 @@ export class PixiAgent {
     }
     reason = reason ?? 'User interrupted';
     this.logger.info({ reason }, 'Interrupting the agent execution');
-    this.abortController.abort(new AgentInterruptedError(reason));
+    this.abortController.abort(PixiAgentErrorBuilder.agentInterrupted(reason));
+    await this.eventEmitter?.executionState.interrupted().catch((error) => {
+      this.logger.error({ error }, 'An error occurred during interruption');
+    });
   }
 
   private async executeLLMRequest(
     transport: ProviderTransport<RawMessageType>,
     modelOptions: ModelOptions,
     historyMessages: RawMessageType[],
-  ): Promise<ModelResponse<RawMessageType>> {
+  ): Promise<RawMessageType> {
     return await withSpan(
       `chat ${modelOptions.model}`,
       async (span) => {
         const createdAt = new Date().toISOString();
-
+        const streamCallbacks = this.eventEmitter
+          ? AgentMessageChunkEventCallbacks.create(
+              this.eventEmitter,
+              this.sessionThread.session.sessionId,
+              this.sessionThread.threadInfo.threadId,
+              'assistant',
+              this.sessionThread.threadInfo.headMessageId ?? null,
+            )
+          : undefined;
         const response = await retry(
           'chat.generate.retry',
           async () => {
-            return await transport.generate(
-              modelOptions,
-              historyMessages,
-              {}, // todo: stream callbacks
-              {
-                signal: this.abortController.signal,
-                timeout: this.options?.modelRequestTimeout,
-              },
-            );
+            return await transport.generate(modelOptions, historyMessages, streamCallbacks, {
+              signal: this.abortController.signal,
+              timeout: this.options?.modelRequestTimeout,
+            });
           },
           {
             span,
@@ -206,9 +225,9 @@ export class PixiAgent {
 
         const responseInternalMsg = this.sessionThread.addMessage(
           'assistant',
-          response.responseMessage,
+          response,
           modelOptions,
-          response.usage,
+          response.modelResponseInfo?.usage,
           createdAt,
         );
         const respSessionMsg = transport.convertFromRawMessage(
@@ -221,22 +240,10 @@ export class PixiAgent {
           'Response from the LLM',
         );
         this.addResponseSpanAttributes(span, modelOptions, response, responseInternalMsg);
+        await streamCallbacks?.onFinish(respSessionMsg);
+        await this.eventEmitter?.executionState.afterModelResponse(respSessionMsg);
 
-        this.options?.eventEmitter?.emit({
-          eventType: 'execution_state_changed',
-          newState: 'after_model_response',
-          message: respSessionMsg,
-          hasToolCall: response.stopReason === 'tool_call' || false,
-          usage: response.usage,
-        });
-
-        return {
-          ...response,
-          responseMessage: {
-            ...response.responseMessage,
-            messageId: responseInternalMsg.rawMessage.messageId,
-          } as RawMessageType,
-        } as ModelResponse<RawMessageType>;
+        return responseInternalMsg.rawMessage as RawMessageType;
       },
       {
         tracer: trace,
@@ -263,7 +270,7 @@ export class PixiAgent {
       'execute_tool_calls',
       async () => {
         const resultParts = await this.executeToolCalls(toolCalls, isParallel);
-        this.appendToolCallResults(transport, modelOptions, historyMessages, resultParts);
+        await this.appendToolCallResults(transport, modelOptions, historyMessages, resultParts);
       },
       {
         tracer: trace,
@@ -323,13 +330,9 @@ export class PixiAgent {
         historyMessages,
         iterations,
       );
-      UsageStats.sum(usage, response.usage);
+      UsageStats.sum(usage, response.modelResponseInfo?.usage);
 
-      this.options?.eventEmitter?.emit({
-        eventType: 'execution_state_changed',
-        newState: 'iteration_completed',
-        iteration: iterations,
-      });
+      await this.eventEmitter?.executionState.iterationCompleted(iterations);
 
       iterations++;
 
@@ -349,14 +352,14 @@ export class PixiAgent {
     modelOptions: ModelOptions,
     historyMessages: RawMessageType[],
     iteration: number,
-  ): Promise<ModelResponse<RawMessageType>> {
+  ): Promise<RawMessageType> {
     return await withSpan(
       'agent_iteration',
       async () => {
         this.ensureMediaSources(modelOptions, transport, historyMessages);
         const response = await this.executeLLMRequest(transport, modelOptions, historyMessages);
 
-        if (response.stopReason === 'tool_call') {
+        if (response.modelResponseInfo?.stopReason === ModelStopReasons.TOOL_CALL) {
           await this.executeToolCallRequest(transport, modelOptions, historyMessages);
         }
 
@@ -406,18 +409,19 @@ export class PixiAgent {
    * @returns
    */
   private getLoopStopReason(
-    response: ModelResponse<RawMessageType>,
+    response: RawMessageType,
     modelOptions: ModelOptions,
   ): AgentStopReason | undefined {
-    if (response.stopReason === 'tool_call') {
+    const stopReason = response.modelResponseInfo?.stopReason;
+    if (stopReason === ModelStopReasons.TOOL_CALL) {
       return undefined;
     }
 
-    if (response.stopReason === 'stop') {
+    if (stopReason === ModelStopReasons.STOP) {
       return 'end_turn';
     }
 
-    if (response.stopReason === 'max_tokens') {
+    if (stopReason === ModelStopReasons.MAX_TOKENS) {
       this.logger.warn(
         {
           max_tokens: modelOptions.maxTokens,
@@ -427,8 +431,8 @@ export class PixiAgent {
       return 'max_tokens';
     }
 
-    if (response.stopReason === 'refusal') {
-      const refusal = (response as { refusal?: string }).refusal;
+    if (stopReason === ModelStopReasons.REFUSAL) {
+      const refusal = response.modelResponseInfo?.refusal;
       this.logger.warn(
         {
           refusal,
@@ -438,7 +442,7 @@ export class PixiAgent {
       return 'refusal';
     }
 
-    if (response.stopReason === 'cancelled' || response.stopReason === 'timeout') {
+    if (stopReason === ModelStopReasons.CANCELLED || stopReason === ModelStopReasons.TIMEOUT) {
       return 'cancelled';
     }
 
@@ -489,28 +493,37 @@ export class PixiAgent {
   private addResponseSpanAttributes(
     span: AgentSpan,
     modelOptions: ModelOptions,
-    response: ModelResponse<Omit<RawMessageType, 'messageId'>>,
+    response: Omit<RawMessageType, 'messageId'>,
     responseInternalMsg: InternalMessage,
   ): void {
+    const modelRespInfo = response.modelResponseInfo;
     span.setAttribute('agent.request.internal_id', responseInternalMsg.previousMessageId!);
     span.setAttribute('agent.response.internal_id', responseInternalMsg.internalMessageId);
-    if (response.responseId) span.setAttribute('gen_ai.response.id', response.responseId);
-    if (response.stopReason)
-      span.setAttribute('gen_ai.response.finish_reasons', [response.stopReason]);
-    if (response.responseModel) span.setAttribute('gen_ai.response.model', response.responseModel);
-    if (response.usage) {
-      span.setAttribute('gen_ai.usage.total_tokens', response.usage.totalTokens);
-      span.setAttribute('gen_ai.usage.input_tokens', response.usage.inputTokens);
-      span.setAttribute('gen_ai.usage.output_tokens', response.usage.outputTokens);
-      if (response.usage.cacheReadTokens !== undefined)
-        span.setAttribute('gen_ai.usage.cache_read.input_tokens', response.usage.cacheReadTokens!);
-      if (response.usage.cacheCreatedTokens !== undefined)
+    if (modelRespInfo?.responseId)
+      span.setAttribute('gen_ai.response.id', modelRespInfo.responseId);
+    if (modelRespInfo?.stopReason)
+      span.setAttribute('gen_ai.response.finish_reasons', [modelRespInfo.stopReason]);
+    if (modelRespInfo?.responseModel)
+      span.setAttribute('gen_ai.response.model', modelRespInfo.responseModel);
+    if (modelRespInfo?.usage) {
+      span.setAttribute('gen_ai.usage.total_tokens', modelRespInfo.usage.totalTokens);
+      span.setAttribute('gen_ai.usage.input_tokens', modelRespInfo.usage.inputTokens);
+      span.setAttribute('gen_ai.usage.output_tokens', modelRespInfo.usage.outputTokens);
+      if (modelRespInfo.usage.cacheReadTokens !== undefined)
+        span.setAttribute(
+          'gen_ai.usage.cache_read.input_tokens',
+          modelRespInfo.usage.cacheReadTokens!,
+        );
+      if (modelRespInfo.usage.cacheCreatedTokens !== undefined)
         span.setAttribute(
           'gen_ai.usage.cache_creation.input_tokens',
-          response.usage.cacheCreatedTokens!,
+          modelRespInfo.usage.cacheCreatedTokens!,
         );
-      if (response.usage.reasoningTokens !== undefined)
-        span.setAttribute('gen_ai.usage.reasoning.output_tokens', response.usage.reasoningTokens!);
+      if (modelRespInfo.usage.reasoningTokens !== undefined)
+        span.setAttribute(
+          'gen_ai.usage.reasoning.output_tokens',
+          modelRespInfo.usage.reasoningTokens!,
+        );
     }
     if (modelOptions.metadata) {
       span.setAttribute('agent.request.metadata', JSON.stringify(modelOptions.metadata));
@@ -561,22 +574,13 @@ export class PixiAgent {
         async () => {
           this.throwIfInterrupted('The agent execution is interrupted, cannot execute tool call');
 
-          this.options?.eventEmitter?.emit({
-            eventType: 'execution_state_changed',
-            newState: 'before_tool_call_request',
-            toolCall: toolCall,
-          });
+          await this.eventEmitter?.executionState.beforeToolCallRequest(toolCall);
 
           const result = await this.toolRegistry.execute(toolCall, {
             signal: this.abortController.signal,
           });
 
-          this.options?.eventEmitter?.emit({
-            eventType: 'execution_state_changed',
-            newState: 'after_tool_call_response',
-            toolCall: toolCall,
-            toolResult: result,
-          });
+          await this.eventEmitter?.executionState.afterToolCallResponse(toolCall, result);
 
           return result;
         },
@@ -593,12 +597,14 @@ export class PixiAgent {
     } catch (error) {
       const result = this.toToolCallErrorResult(toolCall, error);
 
-      this.options?.eventEmitter?.emit({
-        eventType: 'execution_state_changed',
-        newState: 'after_tool_call_response',
-        toolCall: toolCall,
-        toolResult: result,
-      });
+      await this.eventEmitter?.executionState
+        .afterToolCallResponse(toolCall, result)
+        .catch((emitError) => {
+          this.logger.error(
+            { error: emitError },
+            'An error occurred while emitting afterToolCallResponse event',
+          );
+        });
 
       return result;
     }
@@ -615,12 +621,12 @@ export class PixiAgent {
     } as ToolResultPart;
   }
 
-  private appendToolCallResults(
+  private async appendToolCallResults(
     transport: ProviderTransport<RawMessageType>,
     modelOptions: ModelOptions,
     historyMessages: RawMessageType[],
     resultParts: ToolResultPart[],
-  ): void {
+  ): Promise<void> {
     const resultMsg = {
       type: 'session_message',
       role: 'tool',
@@ -633,11 +639,9 @@ export class PixiAgent {
       modelOptions,
     );
 
-    this.options?.eventEmitter?.emit({
-      eventType: 'execution_state_changed',
-      newState: 'tool_calls_finished',
-      message: resultInternalMsg.rawMessage as SessionMessage,
-    });
+    await this.eventEmitter?.executionState.toolCallsFinished(
+      resultInternalMsg.rawMessage as SessionMessage,
+    );
 
     const rawResultMessages = this.toRawMessageArray(
       transport.convertToRawMessage(resultInternalMsg.rawMessage as SessionMessage),
@@ -656,11 +660,11 @@ export class PixiAgent {
     if (signalReason instanceof Error) {
       throw signalReason;
     }
-    throw new AgentInterruptedError(defaultReason);
+    throw PixiAgentErrorBuilder.agentInterrupted(defaultReason);
   }
 
   private isInterruptAbortError(error: unknown): boolean {
-    if (error instanceof AgentInterruptedError) {
+    if (ErrorGuards.isLikelyAbortError(error)) {
       return true;
     }
 
@@ -669,23 +673,13 @@ export class PixiAgent {
     }
 
     const signalReason = this.abortController.signal.reason;
-    if (!(signalReason instanceof AgentInterruptedError)) {
-      return false;
-    }
 
     if (error === signalReason) {
       return true;
     }
 
-    if (error instanceof Error) {
-      const errorName = error.name.toLowerCase();
-      const errorMessage = error.message.toLowerCase();
-      return (
-        errorName === 'aborterror' ||
-        errorName.includes('abort') ||
-        errorMessage.includes('request was aborted') ||
-        errorMessage.includes('aborted')
-      );
+    if (error instanceof Error && ErrorGuards.isLikelyAbortError(error)) {
+      return true;
     }
 
     return false;
@@ -762,8 +756,9 @@ export class PixiAgent {
     stage: 'request' | 'history cache' | 'history conversion',
   ): RawMessageType {
     if (Array.isArray(rawMessage)) {
-      throw new InvalidMessageError(
-        `Expected a single raw message for ${role} role at ${stage}, but got ${rawMessage.length}`,
+      throw PixiAgentErrorBuilder.invalidMessage(
+        `Expected a single raw message for ${role} role at ${stage}, but got an array`,
+        role,
       );
     }
     return rawMessage;
@@ -771,12 +766,15 @@ export class PixiAgent {
 
   private getTransport(options: ModelOptions): ProviderTransport<RawMessageType> {
     // not comparing the model here, because there is no dialect resolver relies on the model for now.
-    if (
+    const apiModeOrBaseUrlChanged =
       this.sessionThread.threadInfo.modelOptions.apiMode !== options.apiMode ||
-      this.sessionThread.threadInfo.modelOptions.baseUrl !== options.baseUrl
-    ) {
-      const transport = PixiAgent.getTransport(options, this._transport);
-      this.convertedMessagesCache.clear();
+      this.sessionThread.threadInfo.modelOptions.baseUrl !== options.baseUrl;
+    const apiKeyChanged = this.sessionThread.threadInfo.modelOptions.apiKey !== options.apiKey;
+    if (apiModeOrBaseUrlChanged || apiKeyChanged) {
+      const transport = PixiAgent.getTransport(options, apiKeyChanged, this._transport);
+      if (apiModeOrBaseUrlChanged) {
+        this.convertedMessagesCache.clear();
+      }
       this._transport = transport;
       this.sessionThread.threadInfo.modelOptions = options;
     }
@@ -832,14 +830,15 @@ export class PixiAgent {
     modelOptions: ModelOptions,
     sessionMessage: Omit<SessionMessage, 'messageId'> & { messageId?: string },
     internalMessage: InternalMessage,
-    response?: ModelResponse<Omit<RawMessageType, 'messageId'>>,
+    response?: Omit<RawMessageType, 'messageId'>,
   ): Record<string, unknown> {
-    const respData = response
+    const modelRespInfo = response?.modelResponseInfo;
+    const respData = modelRespInfo
       ? {
-          responseId: response.responseId,
-          responseModel: response.responseModel,
-          stopReason: response.stopReason,
-          usage: response.usage,
+          responseId: modelRespInfo?.responseId,
+          responseModel: modelRespInfo?.responseModel,
+          stopReason: modelRespInfo?.stopReason,
+          usage: modelRespInfo?.usage,
         }
       : {};
     return {
@@ -863,7 +862,10 @@ export class PixiAgent {
       modelOptions.apiMode,
     );
     if (!resolveResult) {
-      throw new ApiModeResolutionError(modelOptions.model, modelOptions.baseUrl);
+      throw PixiAgentErrorBuilder.apiModeResolutionFailed(
+        modelOptions.model,
+        modelOptions.baseUrl,
+      );
     }
     const [baseUrl, apiMode] = resolveResult;
     if (modelOptions.apiMode !== apiMode || modelOptions.baseUrl !== baseUrl) {
@@ -878,6 +880,7 @@ export class PixiAgent {
 
   private static getTransport(
     modelOptions: ModelOptions,
+    apiKeyChanged: boolean = false,
     transport?: ProviderTransport<RawMessageType>,
   ): ProviderTransport<RawMessageType> {
     const dialectResolver = modelOptions.baseUrl
@@ -888,6 +891,7 @@ export class PixiAgent {
       : undefined;
     if (
       transport &&
+      !apiKeyChanged &&
       transport.apiMode === modelOptions.apiMode &&
       transport.dialectResolver === dialectResolver
     ) {

@@ -206,7 +206,7 @@ export class SessionMemoryRepository implements SessionRepository {
 
     const messagesById = new Map(session.messages.map((message) => [message.internalMessageId, message]));
     const result: InternalMessage[] = [];
-    let currentMessageId: string | undefined = thread.headMessageId;
+    let currentMessageId: string | null = thread.headMessageId;
 
     while (currentMessageId) {
       const message = messagesById.get(currentMessageId);

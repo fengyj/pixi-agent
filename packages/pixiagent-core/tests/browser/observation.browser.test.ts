@@ -187,7 +187,7 @@ describe('observation/browser — log bridge (transport: http)', () => {
 
     expect(LoggerProvider).toHaveBeenCalledOnce();
     expect(BatchLogRecordProcessor).toHaveBeenCalledOnce();
-    expect(mockLoggerProvider.addLogRecordProcessor).toHaveBeenCalledOnce();
+    expect(mockLoggerProvider.addLogRecordProcessor).not.toHaveBeenCalled();
     expect(mockLogsSetGlobal).toHaveBeenCalledWith(mockLoggerProvider);
   });
 

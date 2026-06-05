@@ -24,7 +24,6 @@ import {
   StreamCallbacks,
   DialectResolver,
   ModelRequestOptions,
-  ModelResponse,
 } from './base';
 import {
   AnthropicApiMessage,
@@ -42,6 +41,7 @@ import {
   CitationFileLocation,
   CitationOthersLocation,
   CitationWebLocation,
+  ModelStopReasons,
 } from '../message';
 import {
   AgentInterruptedError,
@@ -98,7 +98,9 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
             } else if (block.type === 'document') {
               return this.convertToDocumentPart(block);
             } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
-              return this.convertToToolCallPart(block as ToolUseBlockParam | ServerToolUseBlockParam);
+              return this.convertToToolCallPart(
+                block as ToolUseBlockParam | ServerToolUseBlockParam,
+              );
             } else if (block.type === 'tool_result') {
               role = 'tool';
               return this.convertToToolResultPart(block);
@@ -113,6 +115,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
         type: 'session_message',
         role,
         content,
+        modelResponseInfo: rawMsg.modelResponseInfo,
         metadata: rawMsg.metadata,
       } as SessionMessage;
     })();
@@ -153,6 +156,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
       type: 'anthropic_api_message',
       role: msg.role,
       content: inner,
+      modelResponseInfo: msg.modelResponseInfo,
       metadata: msg.metadata,
     };
     return this.dialectResolver ? this.dialectResolver.manipulateRawMessage(rawMsg, msg) : rawMsg;
@@ -266,15 +270,37 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
     return streamRequestOptions;
   }
 
-  private toModelResponse(
-    response: Message,
-  ): ModelResponse<Omit<AnthropicApiMessage, 'messageId'>> {
-    const responseMessage: Omit<AnthropicApiMessage, 'messageId'> = {
+  private toModelResponse(response: Message): Omit<AnthropicApiMessage, 'messageId'> {
+    return {
       type: 'anthropic_api_message',
       role: 'assistant',
       content: {
         role: response.role,
         content: response.content,
+      },
+      modelResponseInfo: {
+        responseId: response.id,
+        responseModel: response.model,
+        stopReason: this.getStopReason(
+          this.dialectResolver?.extractFromResponse('stop_reason', response) ??
+            (response.stop_reason as string),
+        ),
+        refusal: response.stop_details?.explanation ?? undefined,
+        usage: {
+          inputTokens: response.usage.input_tokens,
+          outputTokens: response.usage.output_tokens,
+          reasoningTokens:
+            this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ?? undefined,
+          cacheCreatedTokens:
+            this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
+            response.usage.cache_creation_input_tokens ??
+            undefined,
+          cacheReadTokens:
+            this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
+            response.usage.cache_read_input_tokens ??
+            undefined,
+          totalTokens: response.usage.input_tokens + response.usage.output_tokens,
+        },
       },
       metadata: {
         pixiagent_response_id: response.id,
@@ -283,37 +309,13 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
         pixiagent_response_stop_sequence: response.stop_sequence,
       },
     };
-    return {
-      responseId: response.id,
-      responseMessage: responseMessage,
-      responseModel: response.model,
-      stopReason:
-        this.dialectResolver?.extractFromResponse('stop_reason', response) ??
-        this.getStopReason(response.stop_reason as string),
-      refusal: response.stop_details?.explanation ?? undefined,
-      usage: {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-        reasoningTokens:
-          this.dialectResolver?.extractFromResponse('reasoning_tokens', response) ?? undefined,
-        cacheCreatedTokens:
-          this.dialectResolver?.extractFromResponse('cache_created_tokens', response) ??
-          response.usage.cache_creation_input_tokens ??
-          undefined,
-        cacheReadTokens:
-          this.dialectResolver?.extractFromResponse('cache_read_tokens', response) ??
-          response.usage.cache_read_input_tokens ??
-          undefined,
-        totalTokens: response.usage.input_tokens + response.usage.output_tokens,
-      },
-    } as ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>;
   }
 
   private async generateStream(
     params: MessageStreamParams,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>> {
+  ): Promise<Omit<AnthropicApiMessage, 'messageId'>> {
     let currentToolName: string | undefined;
     const toolInputJsonByIndex = new Map<number, string>();
     let response: Message | undefined;
@@ -414,14 +416,13 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
     messages: Array<AnthropicApiMessage>,
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
-  ): Promise<ModelResponse<Omit<AnthropicApiMessage, 'messageId'>>> {
+  ): Promise<Omit<AnthropicApiMessage, 'messageId'>> {
     const params = this.buildStreamParams(options, messages);
 
     try {
       return await this.generateStream(params, callbacks, requestOptions);
     } catch (error) {
       const mappedError = this.wrapRequestError(error, requestOptions);
-      await callbacks?.onError?.(mappedError as Error);
       throw mappedError;
     }
   }
@@ -450,20 +451,20 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
     return new ModelRequestTimeoutError(this.client.baseURL, requestOptions?.timeout, error);
   }
 
-  private getStopReason(finishReason: string): string {
+  private getStopReason(finishReason: string): ModelStopReasons {
     switch (finishReason) {
       case 'end_turn':
       case 'stop_sequence':
       case 'pause_turn':
-        return 'stop';
+        return ModelStopReasons.STOP;
       case 'tool_use':
-        return 'tool_call';
+        return ModelStopReasons.TOOL_CALL;
       case 'max_tokens':
-        return 'max_tokens';
+        return ModelStopReasons.MAX_TOKENS;
       case 'refusal':
-        return 'refusal';
+        return ModelStopReasons.REFUSAL;
       default:
-        return finishReason;
+        return ModelStopReasons.OTHERS;
     }
   }
 
@@ -485,7 +486,9 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
     return textBlock;
   }
 
-  private convertCitationToAnthropicTextCitation(citation: CitationFileLocation | CitationOthersLocation | CitationWebLocation): TextCitation | undefined {
+  private convertCitationToAnthropicTextCitation(
+    citation: CitationFileLocation | CitationOthersLocation | CitationWebLocation,
+  ): TextCitation | undefined {
     if (citation.type === 'web_location') {
       const extra = citation.extra ?? {};
       return {
@@ -505,8 +508,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
             type: 'char_location',
             cited_text: citation.citedText,
             document_index: Number(extra.document_index ?? 0),
-            document_title:
-              typeof extra.document_title === 'string' ? extra.document_title : null,
+            document_title: typeof extra.document_title === 'string' ? extra.document_title : null,
             file_id: typeof extra.file_id === 'string' ? extra.file_id : null,
             start_char_index: citation.startIndex ?? 0,
             end_char_index: citation.endIndex ?? 0,
@@ -516,8 +518,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
             type: 'page_location',
             cited_text: citation.citedText,
             document_index: Number(extra.document_index ?? 0),
-            document_title:
-              typeof extra.document_title === 'string' ? extra.document_title : null,
+            document_title: typeof extra.document_title === 'string' ? extra.document_title : null,
             file_id: typeof extra.file_id === 'string' ? extra.file_id : null,
             start_page_number: citation.startIndex ?? 0,
             end_page_number: citation.endIndex ?? 0,
@@ -527,8 +528,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
             type: 'content_block_location',
             cited_text: citation.citedText,
             document_index: Number(extra.document_index ?? 0),
-            document_title:
-              typeof extra.document_title === 'string' ? extra.document_title : null,
+            document_title: typeof extra.document_title === 'string' ? extra.document_title : null,
             file_id: typeof extra.file_id === 'string' ? extra.file_id : null,
             start_block_index: citation.startIndex ?? 0,
             end_block_index: citation.endIndex ?? 0,
