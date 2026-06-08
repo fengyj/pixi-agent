@@ -1,5 +1,6 @@
 import type {
   Response,
+  ResponseCreateParamsStreaming,
   ResponseErrorEvent,
   ResponseFunctionToolCall,
   ResponseInputItem,
@@ -11,7 +12,8 @@ import type {
   ResponseStreamEvent,
 } from 'openai/resources/responses/responses';
 import { PixiAgentErrorBuilder } from '../../errors';
-import { StreamDataExtractor } from '../base';
+import { ResponseApiMessage } from '../../message';
+import { DialectResolver, StreamCallbacks, StreamDataExtractor } from '../base';
 import { ResponseConversionHelper } from './response-conversion';
 
 export type ResponseStreamAccumulator = StreamDataExtractor<{
@@ -20,311 +22,111 @@ export type ResponseStreamAccumulator = StreamDataExtractor<{
 }>;
 
 export class ResponseStreamProcessor {
-  constructor(private readonly clientBaseUrl?: string) {}
+  constructor(
+    private readonly dialectResolver?: DialectResolver<
+      ResponseApiMessage,
+      ResponseStreamEvent,
+      ResponseCreateParamsStreaming,
+      Response
+    >,
+    private readonly clientBaseUrl?: string,
+  ) {}
+
+  async process(
+    stream: AsyncIterable<ResponseStreamEvent>,
+    callbacks?: StreamCallbacks,
+  ): Promise<Response> {
+    const streamDataExtractor = new StreamDataExtractor(
+      {
+        content: Array<ResponseInputItem | ResponseOutputItem>(),
+        response: undefined as Response | undefined,
+      },
+      callbacks,
+    );
+
+    for await (const event of stream) {
+      await this.applyEvent(event, streamDataExtractor);
+    }
+
+    const response = streamDataExtractor.accumulatedData.response;
+    if (!response) {
+      throw PixiAgentErrorBuilder.modelResponseError(
+        'Response stream ended without a terminal response event',
+        this.clientBaseUrl,
+        'invalid_stream_event',
+      );
+    }
+
+    return response;
+  }
 
   async handleEvent(
     event: ResponseStreamEvent,
     streamDataExtractor: ResponseStreamAccumulator,
   ): Promise<void> {
+    await this.applyEvent(event, streamDataExtractor);
+  }
+
+  private async applyEvent(
+    event: ResponseStreamEvent,
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    if (this.dialectResolver) {
+      await this.dialectResolver.extractFromDelta('reasoning', event, streamDataExtractor as never);
+    }
+
     switch (event.type) {
       case 'response.created':
       case 'response.queued':
       case 'response.in_progress':
         return;
       case 'error':
-        throw this.extractResponseError(event as ResponseErrorEvent);
+        throw this.createResponseError(event as ResponseErrorEvent);
       case 'response.completed':
       case 'response.incomplete':
       case 'response.failed':
         streamDataExtractor.accumulatedData.response = event.response;
         return;
       case 'response.output_item.added':
-        await streamDataExtractor.accumulate(
-          { key: `output_item_${event.output_index}`, value: event.item },
-          (accumulated, data) => {
-            if (accumulated.content.length !== event.output_index) {
-              throw PixiAgentErrorBuilder.modelResponseError(
-                `Received output item for non-existing index ${event.output_index}`,
-                this.clientBaseUrl,
-                'invalid_stream_event',
-                { event },
-              );
-            }
-            accumulated.content.push(data);
-          },
-          (_existing, _newData) => {
-            // keyed output item events are appended in the append callback and do not need further merging.
-          },
-          (delta) => {
-            switch (delta.type) {
-              case 'function_call':
-                return ResponseConversionHelper.toContentPart(delta);
-              default:
-                return null;
-            }
-          },
-        );
+        await this.applyOutputItemAdded(event, streamDataExtractor);
         return;
       case 'response.output_item.done':
-        await streamDataExtractor.accumulate(
-          { key: `output_item_${event.output_index}`, value: event.item },
-          () => undefined,
-          (existing, newData) => {
-            if (streamDataExtractor.accumulatedData.content.length <= event.output_index) {
-              throw PixiAgentErrorBuilder.modelResponseError(
-                `Received output item done event for non-existing index ${event.output_index}`,
-                this.clientBaseUrl,
-                'invalid_stream_event',
-                { event },
-              );
-            }
-            const item = streamDataExtractor.accumulatedData.content[event.output_index];
-            if (existing !== item) {
-              throw PixiAgentErrorBuilder.modelResponseError(
-                `Data mismatch for output item at index ${event.output_index} between added and done events`,
-                this.clientBaseUrl,
-                'invalid_stream_event',
-                { event },
-              );
-            }
-            streamDataExtractor.accumulatedData.content[event.output_index] = newData;
-          },
-          (delta) => {
-            switch (event.item.type) {
-              case 'function_call':
-              case 'message':
-              case 'reasoning':
-                return null;
-              default:
-                return ResponseConversionHelper.toContentPart(
-                  delta as Exclude<ResponseOutputItem, ResponseOutputMessage | ResponseFunctionToolCall>,
-                );
-            }
-          },
-        );
+        await this.applyOutputItemDone(event, streamDataExtractor);
         return;
       case 'response.content_part.added':
-        await streamDataExtractor.accumulate(
-          {
-            key: `output_item_${event.output_index}_content_${event.content_index}`,
-            value: event.part,
-          },
-          (accumulated, data) => {
-            const content =
-              accumulated.content.length > event.output_index
-                ? accumulated.content[event.output_index]
-                : null;
-            if (content == null) {
-              throw PixiAgentErrorBuilder.modelResponseError(
-                `Received content part for non-existing output item at index ${event.output_index}`,
-                this.clientBaseUrl,
-                'invalid_stream_event',
-                { event },
-              );
-            }
-            switch (content.type) {
-              case 'message': {
-                if (data.type !== 'output_text' && data.type !== 'refusal') {
-                  throw PixiAgentErrorBuilder.modelResponseError(
-                    `Expected content part of type output_text or refusal for message item, but got ${data.type}`,
-                    this.clientBaseUrl,
-                    'invalid_stream_event',
-                    { event },
-                  );
-                }
-                const message = accumulated.content[event.output_index] as ResponseOutputMessage;
-                if (message.content.length !== event.content_index) {
-                  throw PixiAgentErrorBuilder.modelResponseError(
-                    `Received out-of-order content part with content_index ${event.content_index} for message item, expected content_index ${message.content.length}`,
-                    this.clientBaseUrl,
-                    'invalid_stream_event',
-                    { event },
-                  );
-                }
-                message.content.push(data);
-                break;
-              }
-              case 'reasoning': {
-                if (data.type !== 'reasoning_text') {
-                  throw PixiAgentErrorBuilder.modelResponseError(
-                    `Expected content part of type reasoning_text for reasoning item, but got ${data.type}`,
-                    this.clientBaseUrl,
-                    'invalid_stream_event',
-                    { event },
-                  );
-                }
-                const reasoningItem = accumulated.content[event.output_index] as ResponseReasoningItem;
-                if (!reasoningItem.content) {
-                  reasoningItem.content = [];
-                }
-                reasoningItem.content.push(data);
-                break;
-              }
-              default:
-                throw PixiAgentErrorBuilder.modelResponseError(
-                  `Received content part for unsupported item type ${content.type}`,
-                  this.clientBaseUrl,
-                  'invalid_stream_event',
-                  { event },
-                );
-            }
-          },
-          (_existing, _newData) => {
-            // keyed content-part events are appended in the append callback and do not need further merging.
-          },
-          (delta) => {
-            switch (delta.type) {
-              case 'output_text':
-                return delta.text === '' ? null : { type: 'text', text: delta.text };
-              case 'refusal':
-                return delta.refusal === '' ? null : { type: 'refusal', reason: delta.refusal };
-              case 'reasoning_text':
-                return delta.text === '' ? null : { type: 'thinking', content: delta.text };
-              default:
-                return null;
-            }
-          },
-        );
+        await this.applyContentPartAdded(event, streamDataExtractor);
         return;
       case 'response.content_part.done':
         return;
       case 'response.output_text.delta':
-        await streamDataExtractor.accumulate(
-          {
-            key: `output_item_${event.output_index}_content_${event.content_index}`,
-            value: { type: 'output_text', text: event.delta } as ResponseOutputText,
-          },
-          () => undefined,
-          (existing, newData) => {
-            existing.text += newData.text;
-          },
-          (delta) => (delta.text === '' ? null : { type: 'text', text: delta.text }),
-        );
+        await this.applyOutputTextDelta(event, streamDataExtractor);
         return;
       case 'response.output_text.annotation.added':
-        await streamDataExtractor.accumulate(
-          {
-            key: `output_item_${event.output_index}_content_${event.content_index}`,
-            value: { type: 'output_text', text: '', annotations: [event.annotation] } as ResponseOutputText,
-          },
-          () => undefined,
-          (existing, newData) => {
-            if (!existing.annotations) {
-              existing.annotations = [];
-            }
-            existing.annotations.push(...newData.annotations);
-          },
-          (delta) => ResponseConversionHelper.toContentPart(delta),
-        );
+        await this.applyOutputTextAnnotationAdded(event, streamDataExtractor);
         return;
       case 'response.output_text.done':
         return;
       case 'response.refusal.delta':
-        await streamDataExtractor.accumulate(
-          {
-            key: `output_item_${event.output_index}_content_${event.content_index}`,
-            value: { type: 'refusal', refusal: event.delta } as ResponseOutputRefusal,
-          },
-          () => undefined,
-          (existing, newData) => {
-            existing.refusal += newData.refusal;
-          },
-          (delta) => (delta.refusal === '' ? null : ResponseConversionHelper.toContentPart(delta)),
-        );
+        await this.applyRefusalDelta(event, streamDataExtractor);
         return;
       case 'response.refusal.done':
         return;
       case 'response.reasoning_text.delta':
-        await streamDataExtractor.accumulate(
-          {
-            key: `output_item_${event.output_index}_content_${event.content_index}`,
-            value: { type: 'reasoning_text', text: event.delta },
-          },
-          () => undefined,
-          (existing, newData) => {
-            existing.text += newData.text;
-          },
-          (delta) => (delta.text === '' ? null : { type: 'thinking', content: delta.text }),
-        );
+        await this.applyReasoningTextDelta(event, streamDataExtractor);
         return;
       case 'response.reasoning_text.done':
         return;
       case 'response.reasoning_summary_part.added':
-        await streamDataExtractor.accumulate(
-          {
-            key: `output_item_${event.output_index}_summary_${event.summary_index}`,
-            value: event.part,
-          },
-          (accumulated, data) => {
-            if (accumulated.content.length <= event.output_index) {
-              throw PixiAgentErrorBuilder.modelResponseError(
-                `Received reasoning summary part for non-existing output item at index ${event.output_index}`,
-                this.clientBaseUrl,
-                'invalid_stream_event',
-                { event },
-              );
-            }
-            const content = accumulated.content[event.output_index];
-            if (content.type !== 'reasoning') {
-              throw PixiAgentErrorBuilder.modelResponseError(
-                `Received reasoning summary part for output item at index ${event.output_index} which is not a reasoning item`,
-                this.clientBaseUrl,
-                'invalid_stream_event',
-                { event },
-              );
-            }
-            if (!content.summary) {
-              content.summary = [];
-            }
-            if (content.summary.length !== event.summary_index) {
-              throw PixiAgentErrorBuilder.modelResponseError(
-                `Received out-of-order reasoning summary part with summary_index ${event.summary_index} for output item at index ${event.output_index}, expected summary_index ${content.summary.length}`,
-                this.clientBaseUrl,
-                'invalid_stream_event',
-                { event },
-              );
-            }
-            content.summary.push(data);
-          },
-          (_existing, _newData) => {
-            // keyed summary events are appended in the append callback and do not need further merging.
-          },
-          (delta) => (delta.text === '' ? null : { type: 'thinking', content: delta.text }),
-        );
+        await this.applyReasoningSummaryPartAdded(event, streamDataExtractor);
         return;
       case 'response.reasoning_summary_text.delta':
-        await streamDataExtractor.accumulate(
-          {
-            key: `output_item_${event.output_index}_summary_${event.summary_index}`,
-            value: { type: 'summary_text', text: event.delta },
-          },
-          () => undefined,
-          (existing, newData) => {
-            if (!existing.text) {
-              existing.text = '';
-            }
-            existing.text += newData.text;
-          },
-          (delta) => (delta.text === '' ? null : { type: 'thinking', content: delta.text }),
-        );
+        await this.applyReasoningSummaryTextDelta(event, streamDataExtractor);
         return;
       case 'response.reasoning_summary_text.done':
       case 'response.reasoning_summary_part.done':
         return;
       case 'response.function_call_arguments.delta':
-        await streamDataExtractor.accumulate(
-          {
-            key: `output_item_${event.output_index}`,
-            value: { arguments: event.delta, call_id: '', name: '', type: 'function_call' } as ResponseFunctionToolCall,
-          },
-          () => undefined,
-          (existing, newData) => {
-            existing.arguments += newData.arguments;
-            newData.call_id = existing.call_id;
-            newData.name = existing.name;
-          },
-          (delta) => (delta.arguments === '' ? null : ResponseConversionHelper.toContentPart(delta)),
-        );
+        await this.applyFunctionCallArgumentsDelta(event, streamDataExtractor);
         return;
       case 'response.function_call_arguments.done':
         return;
@@ -333,7 +135,246 @@ export class ResponseStreamProcessor {
     }
   }
 
-  private extractResponseError(event: ResponseErrorEvent): Error {
+  private async applyOutputItemAdded(
+    event: ResponseStreamEvent & { type: 'response.output_item.added' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      { key: `output_item_${event.output_index}`, value: event.item },
+      (accumulated, data) => {
+        if (accumulated.content.length !== event.output_index) {
+          throw this.createInvalidEventError('Received output item for non-existing index', event);
+        }
+        accumulated.content.push(data);
+      },
+      () => undefined,
+      (delta) => (delta.type === 'function_call' ? ResponseConversionHelper.toContentPart(delta) : null),
+    );
+  }
+
+  private async applyOutputItemDone(
+    event: ResponseStreamEvent & { type: 'response.output_item.done' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      { key: `output_item_${event.output_index}`, value: event.item },
+      () => undefined,
+      (existing, newData) => {
+        if (streamDataExtractor.accumulatedData.content.length <= event.output_index) {
+          throw this.createInvalidEventError('Received output item done event for non-existing index', event);
+        }
+        const item = streamDataExtractor.accumulatedData.content[event.output_index];
+        if (existing !== item) {
+          throw this.createInvalidEventError('Data mismatch for output item between added and done events', event);
+        }
+        streamDataExtractor.accumulatedData.content[event.output_index] = newData;
+      },
+      (delta) => {
+        if (event.item.type === 'function_call' || event.item.type === 'message' || event.item.type === 'reasoning') {
+          return null;
+        }
+        return ResponseConversionHelper.toContentPart(
+          delta as Exclude<ResponseOutputItem, ResponseOutputMessage | ResponseFunctionToolCall>,
+        );
+      },
+    );
+  }
+
+  private async applyContentPartAdded(
+    event: ResponseStreamEvent & { type: 'response.content_part.added' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      {
+        key: `output_item_${event.output_index}_content_${event.content_index}`,
+        value: event.part,
+      },
+      (accumulated, data) => {
+        const content = accumulated.content[event.output_index] ?? null;
+        if (content == null) {
+          throw this.createInvalidEventError('Received content part for non-existing output item', event);
+        }
+
+        if (content.type === 'message') {
+          const part = data as ResponseOutputText | ResponseOutputRefusal;
+          const message = accumulated.content[event.output_index] as ResponseOutputMessage;
+          if (message.content.length !== event.content_index) {
+            throw this.createInvalidEventError('Received out-of-order content part for message item', event);
+          }
+          message.content.push(part);
+          return;
+        }
+
+        if (content.type === 'reasoning') {
+          const part = data as { type: 'reasoning_text'; text: string };
+          const reasoningItem = accumulated.content[event.output_index] as ResponseReasoningItem;
+          reasoningItem.content ??= [];
+          reasoningItem.content.push(part);
+          return;
+        }
+
+        throw this.createInvalidEventError(`Received content part for unsupported item type ${content.type}`, event);
+      },
+      () => undefined,
+      (delta) => {
+        switch (delta.type) {
+          case 'output_text':
+            return delta.text === '' ? null : { type: 'text', text: delta.text };
+          case 'refusal':
+            return delta.refusal === '' ? null : { type: 'refusal', reason: delta.refusal };
+          case 'reasoning_text':
+            return delta.text === '' ? null : { type: 'thinking', content: delta.text };
+          default:
+            return null;
+        }
+      },
+    );
+  }
+
+  private async applyOutputTextDelta(
+    event: ResponseStreamEvent & { type: 'response.output_text.delta' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      {
+        key: `output_item_${event.output_index}_content_${event.content_index}`,
+        value: { type: 'output_text', text: event.delta } as ResponseOutputText,
+      },
+      () => undefined,
+      (existing, newData) => {
+        existing.text += newData.text;
+      },
+      (delta) => (delta.text === '' ? null : { type: 'text', text: delta.text }),
+    );
+  }
+
+  private async applyOutputTextAnnotationAdded(
+    event: ResponseStreamEvent & { type: 'response.output_text.annotation.added' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      {
+        key: `output_item_${event.output_index}_content_${event.content_index}`,
+        value: { type: 'output_text', text: '', annotations: [event.annotation] } as ResponseOutputText,
+      },
+      () => undefined,
+      (existing, newData) => {
+        existing.annotations ??= [];
+        existing.annotations.push(...newData.annotations);
+      },
+      (delta) => ResponseConversionHelper.toContentPart(delta),
+    );
+  }
+
+  private async applyRefusalDelta(
+    event: ResponseStreamEvent & { type: 'response.refusal.delta' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      {
+        key: `output_item_${event.output_index}_content_${event.content_index}`,
+        value: { type: 'refusal', refusal: event.delta } as ResponseOutputRefusal,
+      },
+      () => undefined,
+      (existing, newData) => {
+        existing.refusal += newData.refusal;
+      },
+      (delta) => (delta.refusal === '' ? null : ResponseConversionHelper.toContentPart(delta)),
+    );
+  }
+
+  private async applyReasoningTextDelta(
+    event: ResponseStreamEvent & { type: 'response.reasoning_text.delta' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      {
+        key: `output_item_${event.output_index}_content_${event.content_index}`,
+        value: { type: 'reasoning_text', text: event.delta },
+      },
+      () => undefined,
+      (existing, newData) => {
+        existing.text += newData.text;
+      },
+      (delta) => (delta.text === '' ? null : { type: 'thinking', content: delta.text }),
+    );
+  }
+
+  private async applyReasoningSummaryPartAdded(
+    event: ResponseStreamEvent & { type: 'response.reasoning_summary_part.added' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      {
+        key: `output_item_${event.output_index}_summary_${event.summary_index}`,
+        value: event.part,
+      },
+      (accumulated, data) => {
+        if (accumulated.content.length <= event.output_index) {
+          throw this.createInvalidEventError('Received reasoning summary part for non-existing output item', event);
+        }
+        const content = accumulated.content[event.output_index];
+        if (content.type !== 'reasoning') {
+          throw this.createInvalidEventError('Received reasoning summary part for a non-reasoning output item', event);
+        }
+        content.summary ??= [];
+        if (content.summary.length !== event.summary_index) {
+          throw this.createInvalidEventError('Received out-of-order reasoning summary part', event);
+        }
+        content.summary.push(data);
+      },
+      () => undefined,
+      (delta) => (delta.text === '' ? null : { type: 'thinking', content: delta.text }),
+    );
+  }
+
+  private async applyReasoningSummaryTextDelta(
+    event: ResponseStreamEvent & { type: 'response.reasoning_summary_text.delta' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      {
+        key: `output_item_${event.output_index}_summary_${event.summary_index}`,
+        value: { type: 'summary_text', text: event.delta },
+      },
+      () => undefined,
+      (existing, newData) => {
+        existing.text ??= '';
+        existing.text += newData.text;
+      },
+      (delta) => (delta.text === '' ? null : { type: 'thinking', content: delta.text }),
+    );
+  }
+
+  private async applyFunctionCallArgumentsDelta(
+    event: ResponseStreamEvent & { type: 'response.function_call_arguments.delta' },
+    streamDataExtractor: ResponseStreamAccumulator,
+  ): Promise<void> {
+    await streamDataExtractor.accumulate(
+      {
+        key: `output_item_${event.output_index}`,
+        value: { arguments: event.delta, call_id: '', name: '', type: 'function_call' } as ResponseFunctionToolCall,
+      },
+      () => undefined,
+      (existing, newData) => {
+        existing.arguments += newData.arguments;
+        newData.call_id = existing.call_id;
+        newData.name = existing.name;
+      },
+      (delta) => (delta.arguments === '' ? null : ResponseConversionHelper.toContentPart(delta)),
+    );
+  }
+
+  private createInvalidEventError(message: string, event: ResponseStreamEvent): Error {
+    return PixiAgentErrorBuilder.modelResponseError(
+      message,
+      this.clientBaseUrl,
+      'invalid_stream_event',
+      { event },
+    );
+  }
+
+  private createResponseError(event: ResponseErrorEvent): Error {
     switch (event.code) {
       case 'rate_limit_exceeded':
       case 'vector_store_timeout':

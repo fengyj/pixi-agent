@@ -16,7 +16,6 @@ import {
   ModelRequestOptions,
   ProviderTransport,
   StreamCallbacks,
-  StreamDataExtractor,
 } from '../base';
 import { ResponseConversionHelper } from './response-conversion';
 import { ResponseStreamProcessor } from './response-stream';
@@ -300,26 +299,16 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
         this.getStreamRequestOptions(requestOptions),
       );
 
-      const streamDataExtractor = new StreamDataExtractor(
-        {
-          content: Array<ResponseInputItem | ResponseOutputItem>(),
-          response: undefined as Response | undefined,
-        },
-        callbacks,
+      const streamProcessor = new ResponseStreamProcessor(
+        this.dialectResolver as DialectResolver<
+          ResponseApiMessage,
+          ResponseStreamEvent,
+          ResponseCreateParamsStreaming,
+          Response
+        > | undefined,
+        this.client.baseURL,
       );
-
-      const streamProcessor = new ResponseStreamProcessor(this.client.baseURL);
-      for await (const event of stream) {
-        await streamProcessor.handleEvent(event as ResponseStreamEvent, streamDataExtractor);
-      }
-      const response = streamDataExtractor.accumulatedData.response;
-      if (!response) {
-        throw PixiAgentErrorBuilder.modelResponseError(
-          'Response stream ended without a terminal response event',
-          this.client.baseURL,
-          'invalid_stream_event',
-        );
-      }
+      const response = await streamProcessor.process(stream as AsyncIterable<ResponseStreamEvent>, callbacks);
 
       return this.getResponseMessage(response);
     } catch (error) {
