@@ -1,19 +1,25 @@
 import type {
   ChatCompletion,
   ChatCompletionChunk,
-  ChatCompletionStreamParams,
+  ChatCompletionCreateParamsStreaming,
 } from 'openai/resources/chat/completions';
 import type {
   Response,
-  ResponseCreateParams,
+  ResponseCreateParamsStreaming,
   ResponseStreamEvent,
 } from 'openai/resources/responses/responses';
 import type {
   Message,
-  MessageStreamParams,
+  MessageCreateParamsStreaming,
   RawContentBlockDelta,
 } from '@anthropic-ai/sdk/resources/messages/messages';
-import { ApiModes, AnthropicApiMessage, ChatCompletionApiMessage, ResponseApiMessage, SessionMessage } from '../../message';
+import {
+  ApiModes,
+  AnthropicApiMessage,
+  ChatCompletionApiMessage,
+  ResponseApiMessage,
+  SessionMessage,
+} from '../../message';
 import { ApiModeResolver, DialectResolver, ModelOptions, StreamDataExtractor } from '../base';
 
 const OFOX_OPENAI_BASES = ['https://api.ofox.ai/v1', 'https://api.ofox.io/v1'];
@@ -52,7 +58,10 @@ export class OfoxApiModeResolver extends ApiModeResolver {
     if (isIn(normalized, OFOX_RESPONSES_ENDPOINTS)) {
       return ApiModes.RESPONSE;
     }
-    if (isIn(normalized, OFOX_ANTHROPIC_BASES) || isIn(normalized, OFOX_ANTHROPIC_MESSAGES_ENDPOINTS)) {
+    if (
+      isIn(normalized, OFOX_ANTHROPIC_BASES) ||
+      isIn(normalized, OFOX_ANTHROPIC_MESSAGES_ENDPOINTS)
+    ) {
       return ApiModes.ANTHROPIC;
     }
 
@@ -68,7 +77,7 @@ export class OfoxApiModeResolver extends ApiModeResolver {
 export class OfoxChatDialectResolver implements DialectResolver<
   ChatCompletionApiMessage,
   ChatCompletionChunk.Choice.Delta,
-  ChatCompletionStreamParams,
+  ChatCompletionCreateParamsStreaming,
   ChatCompletion
 > {
   match(_model: string, baseUrl: string): boolean {
@@ -78,8 +87,8 @@ export class OfoxChatDialectResolver implements DialectResolver<
 
   manipulateOptions(
     _options: ModelOptions,
-    parameters: ChatCompletionStreamParams,
-  ): ChatCompletionStreamParams {
+    parameters: ChatCompletionCreateParamsStreaming,
+  ): ChatCompletionCreateParamsStreaming {
     return parameters;
   }
 
@@ -94,8 +103,8 @@ export class OfoxChatDialectResolver implements DialectResolver<
     return msg;
   }
 
-  extractFromDelta<T extends Record<string, unknown>>(
-    _data: 'reasoning' | string, 
+  extractFromDelta<T extends object>(
+    _data: 'reasoning' | string,
     _delta: ChatCompletionChunk.Choice.Delta,
     _streamDataExtractor: StreamDataExtractor<T>,
   ): Promise<void> {
@@ -111,14 +120,17 @@ export class OfoxChatDialectResolver implements DialectResolver<
 export class OfoxResponseDialectResolver implements DialectResolver<
   ResponseApiMessage,
   ResponseStreamEvent,
-  ResponseCreateParams,
+  ResponseCreateParamsStreaming,
   Response
 > {
   match(_model: string, baseUrl: string): boolean {
     return isIn(normalizeUrl(baseUrl), OFOX_RESPONSES_ENDPOINTS);
   }
 
-  manipulateOptions(options: ModelOptions, parameters: ResponseCreateParams): ResponseCreateParams {
+  manipulateOptions(
+    options: ModelOptions,
+    parameters: ResponseCreateParamsStreaming,
+  ): ResponseCreateParamsStreaming {
     if (!options.thinkEffort) return parameters;
 
     const effortMap: Record<string, 'none' | 'low' | 'medium' | 'high' | 'xhigh'> = {
@@ -149,8 +161,8 @@ export class OfoxResponseDialectResolver implements DialectResolver<
     return msg;
   }
 
-  extractFromDelta<T extends Record<string, unknown>>(
-    _data: 'reasoning' | string, 
+  extractFromDelta<T extends object>(
+    _data: 'reasoning' | string,
     _delta: ResponseStreamEvent,
     _streamDataExtractor: StreamDataExtractor<T>,
   ): Promise<void> {
@@ -166,15 +178,20 @@ export class OfoxResponseDialectResolver implements DialectResolver<
 export class OfoxAnthropicDialectResolver implements DialectResolver<
   AnthropicApiMessage,
   RawContentBlockDelta,
-  MessageStreamParams,
+  MessageCreateParamsStreaming,
   Message
 > {
   match(_model: string, baseUrl: string): boolean {
     const normalized = normalizeUrl(baseUrl);
-    return isIn(normalized, OFOX_ANTHROPIC_BASES) || isIn(normalized, OFOX_ANTHROPIC_MESSAGES_ENDPOINTS);
+    return (
+      isIn(normalized, OFOX_ANTHROPIC_BASES) || isIn(normalized, OFOX_ANTHROPIC_MESSAGES_ENDPOINTS)
+    );
   }
 
-  manipulateOptions(_options: ModelOptions, parameters: MessageStreamParams): MessageStreamParams {
+  manipulateOptions(
+    _options: ModelOptions,
+    parameters: MessageCreateParamsStreaming,
+  ): MessageCreateParamsStreaming {
     return parameters;
   }
 
@@ -186,8 +203,8 @@ export class OfoxAnthropicDialectResolver implements DialectResolver<
     return msg;
   }
 
-  extractFromDelta<T extends Record<string, unknown>>(
-    _data: 'reasoning' | string, 
+  extractFromDelta<T extends object>(
+    _data: 'reasoning' | string,
     _delta: RawContentBlockDelta,
     _streamDataExtractor: StreamDataExtractor<T>,
   ): Promise<void> {

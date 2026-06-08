@@ -2,17 +2,17 @@ import type {
   ChatCompletion,
   ChatCompletionAssistantMessageParam,
   ChatCompletionChunk,
+  ChatCompletionCreateParamsStreaming,
   ChatCompletionMessageParam,
-  ChatCompletionStreamParams,
 } from 'openai/resources/chat/completions';
 import type {
   Response,
-  ResponseCreateParams,
+  ResponseCreateParamsStreaming,
   ResponseStreamEvent,
 } from 'openai/resources/responses/responses';
 import type {
   Message,
-  MessageStreamParams,
+  MessageCreateParamsStreaming,
   RawContentBlockDelta,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
@@ -22,9 +22,10 @@ import {
   ResponseApiMessage,
   SessionMessage,
   ThinkingPart,
-  ContentPart,
 } from '../../message';
 import { ApiModeResolver, DialectResolver, ModelOptions, StreamDataExtractor } from '../base';
+import { ContentParts } from '../../utils';
+import { PixiAgentErrorBuilder } from '../../errors';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 const OPENROUTER_RESPONSES_ENDPOINT = 'https://openrouter.ai/api/v1/responses';
@@ -66,7 +67,7 @@ export class OpenRouterApiModeResolver extends ApiModeResolver {
 export class OpenRouterChatDialectResolver implements DialectResolver<
   ChatCompletionApiMessage,
   ChatCompletionChunk.Choice.Delta,
-  ChatCompletionStreamParams,
+  ChatCompletionCreateParamsStreaming,
   ChatCompletion
 > {
   match(_model: string, baseUrl: string): boolean {
@@ -76,8 +77,8 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
 
   manipulateOptions(
     options: ModelOptions,
-    parameters: ChatCompletionStreamParams,
-  ): ChatCompletionStreamParams {
+    parameters: ChatCompletionCreateParamsStreaming,
+  ): ChatCompletionCreateParamsStreaming {
     if (!options.thinkEffort) return parameters;
 
     // OpenRouter uses extra_body.reasoning.effort (unified across providers).
@@ -144,9 +145,15 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
     if (inner.role !== 'assistant') return msg;
 
     const raw = inner as ChatCompletionAssistantMessageParam & {
-      reasoning?: string;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      reasoning_details?: any[];
+      reasoning_details?: {
+        type: string;
+        text?: string;
+        summary?: string;
+        index: number;
+        id?: string;
+        format?: string;
+        signature?: string;
+      }[];
     };
 
     const thinkingParts: ThinkingPart[] = [];
@@ -163,24 +170,23 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
           thinkingParts.push({
             type: 'thinking',
             content: detail.summary ?? '',
+            isSummary: true,
           });
         }
       }
-    } else if (raw.reasoning) {
-      thinkingParts.push({ type: 'thinking', content: raw.reasoning });
-    }
+    } 
 
     if (thinkingParts.length === 0) return msg;
 
-    return { ...msg, content: ContentPart.concat(thinkingParts, msg.content) };
+    return { ...msg, content: ContentParts.concat(thinkingParts, msg.content) };
   }
 
-  async extractFromDelta<T extends Record<string, unknown>>(
+  async extractFromDelta<T extends object>(
     data: string,
     delta: ChatCompletionChunk.Choice.Delta,
     streamDataExtractor: StreamDataExtractor<T>,
   ): Promise<void> {
-    const getMessageObj = (acc: T): Record<string, unknown> | undefined => {
+    const getMessageObj = (acc: T): object | undefined => {
       if (!('choices' in acc && Array.isArray(acc.choices) && acc.choices.length > 0))
         return undefined;
       if (!('message' in acc.choices[0] && typeof acc.choices[0].message === 'object'))
@@ -198,25 +204,38 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
           (d) =>
             typeof d === 'object' &&
             typeof d.type === 'string' &&
-            (d.type === 'reasoning.text' || d.type === 'reasoning.summary') &&
+            'index' in d && typeof d.index === 'number' &&
             (typeof d.text === 'string' || typeof d.summary === 'string'),
         )
       ) {
-        for (const detail of delta.reasoning_details) {
+        for (const item of delta.reasoning_details) {
+          const detail = item as {
+            type: 'reasoning.text' | 'reasoning.summary' | string;
+            text?: string;
+            summary?: string;
+            index: number;
+            id?: string;
+            format?: string;
+            signature?: string;
+          };
           await streamDataExtractor.accumulate(
             {
               key: `reasoning_details_${detail.index}`,
               value: detail,
             },
             (acc, newData) => {
-              const message = getMessageObj(acc);
+              const message = getMessageObj(acc) as { reasoning_details?: unknown[] } | undefined;
               if (!message) return;
               if (!('reasoning_details' in message) || !Array.isArray(message.reasoning_details)) {
                 (
-                  message as Record<string, unknown> & { reasoning_details: unknown[] }
+                  message as object & { reasoning_details: unknown[] }
                 ).reasoning_details = [];
               }
-              (message.reasoning_details as unknown[]).push(newData);
+              const details = message.reasoning_details as unknown[];
+              if(details.length >= detail.index) {
+                throw PixiAgentErrorBuilder.modelResponseError(`Received reasoning_details with non-sequential index ${detail.index}`);
+              }
+              details.push(newData);
             },
             (existing, newData, _acc) => {
               existing.type = existing.type ?? newData.type;
@@ -228,45 +247,26 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
               existing.id = existing.id ?? newData.id;
               existing.format = existing.format ?? newData.format;
               if ('signature' in newData && typeof newData.signature === 'string') {
-                existing.signature = `${existing.signature ?? ''}${newData.signature ?? ''}`;
+                existing.signature = existing.signature ?? newData.signature;
               }
             },
             (data) => {
+              if (!data || (data.type !== 'reasoning.text' && data.type !== 'reasoning.summary')) {
+                return null;
+              }
               const content = data.summary || data.text || '';
               if (!content || content.length === 0) {
                 return null;
               }
-              return { type: 'thinking' as const, content: content, signature: data.signature };
+              return { 
+                type: 'thinking' as const, 
+                content: content, 
+                signature: data.signature,
+                isSummary: data.type === 'reasoning.summary',
+               };
             },
           );
         }
-      } else if (
-        ('reasoning' in delta &&
-          typeof delta.reasoning === 'string' &&
-          delta.reasoning.length > 0) ||
-        ('reasoning_content' in delta &&
-          typeof delta.reasoning_content === 'string' &&
-          delta.reasoning_content.length > 0)
-      ) {
-        const propName = 'reasoning' in delta ? 'reasoning' : 'reasoning_content';
-        await streamDataExtractor.accumulate(
-          { value: (delta as Record<string, unknown>)[propName] as string },
-          (acc, newData) => {
-            const message = getMessageObj(acc);
-            if (!message) return;
-            if (!(propName in message) || typeof message[propName] !== 'string') {
-              (message as Record<string, unknown> & { [key: string]: string })[propName] = '';
-            }
-            (message as Record<string, unknown> & { [key: string]: string })[propName] += newData;
-          },
-          null,
-          (data) => {
-            if (!data || data.length === 0) {
-              return null;
-            }
-            return { type: 'thinking' as const, content: data };
-          },
-        );
       }
     }
   }
@@ -292,7 +292,7 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
 export class OpenRouterResponseDialectResolver implements DialectResolver<
   ResponseApiMessage,
   ResponseStreamEvent,
-  ResponseCreateParams,
+  ResponseCreateParamsStreaming,
   Response
 > {
   match(_model: string, baseUrl: string): boolean {
@@ -300,7 +300,10 @@ export class OpenRouterResponseDialectResolver implements DialectResolver<
     return normalized === OPENROUTER_RESPONSES_ENDPOINT;
   }
 
-  manipulateOptions(options: ModelOptions, parameters: ResponseCreateParams): ResponseCreateParams {
+  manipulateOptions(
+    options: ModelOptions,
+    parameters: ResponseCreateParamsStreaming,
+  ): ResponseCreateParamsStreaming {
     if (!options.thinkEffort) return parameters;
 
     // Keep effort mapping aligned with OpenRouter Responses `reasoning.effort`.
@@ -331,7 +334,7 @@ export class OpenRouterResponseDialectResolver implements DialectResolver<
     return msg;
   }
 
-  extractFromDelta<T extends Record<string, unknown>>(
+  extractFromDelta<T extends object>(
     _data: 'reasoning' | string,
     _delta: ResponseStreamEvent,
     _streamDataExtractor: StreamDataExtractor<T>,
@@ -357,14 +360,14 @@ export class OpenRouterResponseDialectResolver implements DialectResolver<
 export class OpenRouterAnthropicDialectResolver implements DialectResolver<
   AnthropicApiMessage,
   RawContentBlockDelta,
-  MessageStreamParams,
+  MessageCreateParamsStreaming,
   Message
 > {
   match(_model: string, baseUrl: string): boolean {
     return normalizeUrl(baseUrl) === OPENROUTER_ANTHROPIC_MESSAGES_ENDPOINT;
   }
 
-  manipulateOptions(_options: ModelOptions, parameters: MessageStreamParams): MessageStreamParams {
+  manipulateOptions(_options: ModelOptions, parameters: MessageCreateParamsStreaming): MessageCreateParamsStreaming {
     return parameters;
   }
 
@@ -376,7 +379,7 @@ export class OpenRouterAnthropicDialectResolver implements DialectResolver<
     return msg;
   }
 
-  extractFromDelta<T extends Record<string, unknown>>(
+  extractFromDelta<T extends object>(
     _data: 'reasoning' | string,
     _delta: RawContentBlockDelta,
     _streamDataExtractor: StreamDataExtractor<T>,

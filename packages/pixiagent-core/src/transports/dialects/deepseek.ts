@@ -2,8 +2,8 @@ import type {
   ChatCompletion,
   ChatCompletionAssistantMessageParam,
   ChatCompletionChunk,
+  ChatCompletionCreateParamsStreaming,
   ChatCompletionMessageParam,
-  ChatCompletionStreamParams,
 } from 'openai/resources/chat/completions';
 import {
   ApiModes,
@@ -11,16 +11,16 @@ import {
   ChatCompletionApiMessage,
   SessionMessage,
   ThinkingPart,
-  ContentPart,
 } from '../../message';
 import { ApiModeResolver, DialectResolver, ModelOptions, StreamDataExtractor } from '../base';
 import type {
   Message,
+  MessageCreateParamsStreaming,
   MessageParam,
-  MessageStreamParams,
   RawContentBlockDelta,
   ThinkingBlockParam,
 } from '@anthropic-ai/sdk/resources/messages/messages';
+import { ContentParts } from '../../utils';
 
 export class DeepSeekApiModeResolver extends ApiModeResolver {
   getApiMode(_model: string, baseUrl?: string): ApiModes | undefined {
@@ -44,7 +44,7 @@ export class DeepSeekApiModeResolver extends ApiModeResolver {
 export class DeepSeekChatDialectResolver implements DialectResolver<
   ChatCompletionApiMessage,
   ChatCompletionChunk.Choice.Delta,
-  ChatCompletionStreamParams,
+  ChatCompletionCreateParamsStreaming,
   ChatCompletion
 > {
   // Models that doesn't support the reasoning_effort parameter
@@ -56,8 +56,8 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
 
   manipulateOptions(
     options: ModelOptions,
-    parameters: ChatCompletionStreamParams,
-  ): ChatCompletionStreamParams {
+    parameters: ChatCompletionCreateParamsStreaming,
+  ): ChatCompletionCreateParamsStreaming {
     // DeepSeek doesn't support the 'developer' role; convert to 'system'
     parameters.messages = parameters.messages.map((msg) =>
       msg.role === 'developer' ? { ...msg, role: 'system' } : msg,
@@ -110,15 +110,16 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
     ).reasoning_content;
     if (!reasoningContent) return msg;
     const thinkingPart: ThinkingPart = { type: 'thinking', content: reasoningContent };
-    return { ...msg, content: ContentPart.concat([thinkingPart], msg.content) };
+    return { ...msg, content: ContentParts.concat([thinkingPart], msg.content) };
   }
 
-  async extractFromDelta<T extends Record<string, unknown>>(
+  async extractFromDelta<T extends object>(
     data: string,
     delta: ChatCompletionChunk.Choice.Delta,
     streamDataExtractor: StreamDataExtractor<T>,
   ): Promise<void> {
-    const getMessageObj = (acc: T): Record<string, unknown> | undefined => {
+    const getMessageObj = (acc: T): object | undefined => {
+      if (!acc || typeof acc !== 'object') return undefined;
       if (!('choices' in acc && Array.isArray(acc.choices) && acc.choices.length > 0))
         return undefined;
       if (!('message' in acc.choices[0] && typeof acc.choices[0].message === 'object'))
@@ -133,11 +134,10 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
         delta.reasoning_content.length > 0
       ) {
         const reasoningUpdater: (acc: T, newData: string) => void = (acc, newData) => {
-          const message = getMessageObj(acc);
+          const message = getMessageObj(acc) as { reasoning_content?: string } | undefined;
           if (!message) return;
           if (!('reasoning_content' in message && typeof message.reasoning_content === 'string')) {
-            (message as Record<string, unknown> & { reasoning_content: string }).reasoning_content =
-              '';
+            (message as object & { reasoning_content: string }).reasoning_content = '';
           }
           message.reasoning_content += newData;
         };
@@ -152,7 +152,7 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
             if (!data || data.length === 0) {
               return null;
             }
-            return { type: 'thinking' as const, content: data }
+            return { type: 'thinking' as const, content: data };
           },
         );
       }
@@ -179,7 +179,7 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
 export class DeepSeekAnthropicDialectResolver implements DialectResolver<
   AnthropicApiMessage,
   RawContentBlockDelta,
-  MessageStreamParams,
+  MessageCreateParamsStreaming,
   Message
 > {
   match(model: string, baseUrl: string): boolean {
@@ -189,7 +189,10 @@ export class DeepSeekAnthropicDialectResolver implements DialectResolver<
   // Models that support extended thinking
   private static readonly REASONING_MODELS = ['deepseek-reasoner'];
 
-  manipulateOptions(options: ModelOptions, parameters: MessageStreamParams): MessageStreamParams {
+  manipulateOptions(
+    options: ModelOptions,
+    parameters: MessageCreateParamsStreaming,
+  ): MessageCreateParamsStreaming {
     if (!options.thinkEffort || options.thinkEffort === 'disable') return parameters;
     if (!DeepSeekAnthropicDialectResolver.REASONING_MODELS.includes(options.model))
       return parameters;
@@ -277,7 +280,7 @@ export class DeepSeekAnthropicDialectResolver implements DialectResolver<
     return msg;
   }
 
-  extractFromDelta<T extends Record<string, unknown>>(
+  extractFromDelta<T extends object>(
     _data: string,
     _delta: RawContentBlockDelta,
     _streamDataExtractor: StreamDataExtractor<T>,

@@ -1,14 +1,37 @@
+import type {  RawContentBlockDelta } from '@anthropic-ai/sdk/resources/messages';
+import type { Message, MessageCreateParamsStreaming } from '@anthropic-ai/sdk/resources/messages/messages';
+import type {
+  ChatCompletion,
+  ChatCompletionChunk,
+  ChatCompletionCreateParamsStreaming,
+} from 'openai/resources/chat/completions/completions';
+import type {
+  Response,
+  ResponseCreateParamsStreaming,
+  ResponseStreamEvent,
+} from 'openai/resources/responses/responses';
 import { z } from 'zod';
+
 import {
   ApiModes,
   ContentPart,
-  RawDeltaMessageType,
-  RawLLMParametersType,
   RawMessageType,
-  RawResponseType,
   SessionMessage,
 } from '../message';
 import { ToolDefinitionSchema } from '../tools/tool';
+
+
+type RawDeltaMessageType =
+  | ChatCompletionChunk.Choice.Delta
+  | ResponseStreamEvent
+  | RawContentBlockDelta;
+
+type RawLLMParametersType =
+  | MessageCreateParamsStreaming
+  | ChatCompletionCreateParamsStreaming
+  | ResponseCreateParamsStreaming;
+
+type RawResponseType = ChatCompletion | Response | Message;
 
 /**
  * The base class for the transport of the provider.
@@ -222,7 +245,7 @@ export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters, TRawR
    *                            And if the callbacks parameter is provided,
    *                            emit the chunk data via the callbacks.
    */
-  abstract extractFromDelta<T extends Record<string, unknown>>(
+  abstract extractFromDelta<T extends object>(
     data: 'reasoning' | string,
     delta: TRawDelta,
     streamDataExtractor: StreamDataExtractor<T>,
@@ -353,7 +376,7 @@ export interface StreamCallbacks {
  * If need to resolve this issue, have to check the content part if exists in the next delta data.
  * This will make the logic much more complicated.
  */
-export class StreamDataExtractor<T extends Record<string, unknown>> {
+export class StreamDataExtractor<T extends object> {
   public readonly accumulatedData: T;
   /**
    * The contentPartIndex means the nth content part emitted in the stream.
@@ -385,7 +408,7 @@ export class StreamDataExtractor<T extends Record<string, unknown>> {
   async accumulate<P>(
     delta: { key?: string; value: P },
     append: (accumulated: T, newData: P) => void,
-    merge: ((existing: P, newData: P, accumulated?: T) => void) | null,
+    merge: ((existing: P, newData: P, accumulated: T) => void) | null,
     toContentPart: (data: P) => ContentPart | null,
   ): Promise<void> {
     const singleChunkBlock = !delta.key;

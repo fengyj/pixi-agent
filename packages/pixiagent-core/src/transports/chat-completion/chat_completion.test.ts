@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ChatCompletionTransport } from './chat_completion';
-import type { ChatCompletionApiMessage, SessionMessage } from '../message';
+import type { ChatCompletionApiMessage, SessionMessage } from '../../message';
 
 describe('ChatCompletionTransport conversion', () => {
   const transport = new ChatCompletionTransport(undefined, 'test-api-key');
@@ -37,10 +37,8 @@ describe('ChatCompletionTransport conversion', () => {
       role: 'assistant',
       content: {
         role: 'assistant',
-        content: [
-          { type: 'text', text: 'hello from citation' },
-          { type: 'refusal', refusal: 'policy' },
-        ],
+        content: 'hello from citation',
+        refusal: 'policy',
         annotations: [
           {
             type: 'url_citation',
@@ -134,7 +132,7 @@ describe('ChatCompletionTransport conversion', () => {
 
     expect(raw.content).toMatchObject({
       role: 'assistant',
-      content: [{ type: 'text', text: 'result available' }],
+      content: 'result available',
       tool_calls: [
         {
           type: 'function',

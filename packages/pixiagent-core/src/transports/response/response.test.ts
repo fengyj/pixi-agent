@@ -3,7 +3,7 @@ import { ResponseTransport, ConvertHelper } from './response';
 import type {
   ResponseApiMessage,
   SessionMessage,
-} from '../message';
+} from '../../message';
 import type {
   ResponseInputItem,
   ResponseOutputItem,

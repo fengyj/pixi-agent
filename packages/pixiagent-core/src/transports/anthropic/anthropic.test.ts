@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AnthropicTransport } from './anthropic';
-import type { AnthropicApiMessage, SessionMessage } from '../message';
+import type { AnthropicApiMessage, SessionMessage } from '../../message';
 
 describe('AnthropicTransport conversion', () => {
   const transport = new AnthropicTransport(undefined, 'test-api-key');

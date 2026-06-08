@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { ChatCompletionTransport } from './chat_completion';
-import { AnthropicTransport } from './anthropic';
-import { ResponseTransport } from './response';
+import { ChatCompletionTransport } from './chat-completion/chat_completion';
+import { AnthropicTransport } from './anthropic/anthropic';
+import { ResponseTransport } from './response/response';
 import type {
   AnthropicApiMessage,
   ChatCompletionApiMessage,

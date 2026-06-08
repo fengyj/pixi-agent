@@ -1,20 +1,12 @@
-import type { MessageParam, RawContentBlockDelta } from '@anthropic-ai/sdk/resources/messages';
-import type { Message, MessageStreamParams } from '@anthropic-ai/sdk/resources/messages/messages';
+import type { MessageParam } from '@anthropic-ai/sdk/resources/messages';
 import type {
-  ChatCompletion,
-  ChatCompletionChunk,
   ChatCompletionMessageParam,
-  ChatCompletionStreamParams,
 } from 'openai/resources/chat/completions/completions';
 import type {
-  Response,
-  ResponseCreateParams,
   ResponseInputItem,
   ResponseOutputItem,
-  ResponseStreamEvent,
 } from 'openai/resources/responses/responses';
 import { z } from 'zod';
-import { ModelProvider } from './model';
 
 export enum ApiModes {
   COMPLETIONS = 'completions',
@@ -23,7 +15,7 @@ export enum ApiModes {
   BEDROCK = 'bedrock', // maybe this should be a dialect
 }
 
-const RoleTypeSchema = z.enum(['assistant', 'user', 'tool']);
+const RoleTypeSchema = z.union([z.literal('assistant'), z.literal('user'), z.literal('tool')]);
 export type RoleType = z.infer<typeof RoleTypeSchema>;
 
 const UsageStatsSchema = z.object({
@@ -177,8 +169,6 @@ const CitationWebLocationSchema = z.object({
   title: z.string().optional(),
   startIndex: z.number().optional(),
   endIndex: z.number().optional(),
-  /** For the fields not very common in the original citation/annotation data */
-  extra: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type CitationWebLocation = z.infer<typeof CitationWebLocationSchema>;
@@ -192,8 +182,8 @@ const CitationFileLocationSchema = z.object({
   startIndex: z.number().optional(),
   /** can be end_page_number/end_block_index/end_index/etc. */
   endIndex: z.number().optional(),
-  /** For the fields not very common in the original citation/annotation data */
-  extra: z.record(z.string(), z.unknown()).optional(),
+  /** page/char/block/etc. */
+  indexType: z.string().optional(),
 });
 
 export type CitationFileLocation = z.infer<typeof CitationFileLocationSchema>;
@@ -205,8 +195,8 @@ const CitationOthersLocationSchema = z.object({
   title: z.string().optional(),
   startIndex: z.number().optional(),
   endIndex: z.number().optional(),
-  /** For the fields not very common in the original citation/annotation data */
-  extra: z.record(z.string(), z.unknown()).optional(),
+  /** page/char/block/etc. */
+  indexType: z.string().optional(),
 });
 
 export type CitationOthersLocation = z.infer<typeof CitationOthersLocationSchema>;
@@ -231,6 +221,7 @@ const ThinkingPartSchema = z.object({
   type: z.literal('thinking'),
   content: z.string(),
   signature: z.string().optional(),
+  isSummary: z.boolean().optional(),
 });
 
 export type ThinkingPart = z.infer<typeof ThinkingPartSchema>;
@@ -306,11 +297,33 @@ const ToolResultPartSchema = z.object({
   isError: z.boolean().optional(),
   /**
    * Indicate if the tool call is a specific function call only used for the particular LLM provider.
+   * 
+   * when the result part is from a provider-specific tool call, 
+   * the result is the JSON of the original object excluded the fields of `type`, `id`, and `name`.
+   * For example, for Anthropic, the result part is manipulated as below:
+   * @example
+   * const  {tool_use_id, type, ...resultObj } = block;
+   * {
+      type: 'tool_result',
+      id: tool_use_id,
+      name: type.replace('_tool_result', ''),
+      result: JSON.stringify(resultObj),
+      providerSpecific: ApiModes.ANTHROPIC,
+    }
    */
   providerSpecific: z.enum(ApiModes).optional(),
 });
 
 export type ToolResultPart = z.infer<typeof ToolResultPartSchema>;
+
+const ServerToolUsePartSchema = z.object({
+  type: z.literal('server_tool_use'),
+  name: z.string(),
+  data: z.string().optional(),
+  providerSpecific: z.enum(ApiModes),
+});
+
+export type ServerToolUsePart = z.infer<typeof ServerToolUsePartSchema>;
 
 const ContentPartSchema = z.union([
   TextPartSchema,
@@ -322,91 +335,11 @@ const ContentPartSchema = z.union([
   VideoPartSchema,
   ToolCallPartSchema,
   ToolResultPartSchema,
+  ServerToolUsePartSchema,
 ]);
 
 export type ContentPart = z.infer<typeof ContentPartSchema>;
 
-/**
- * Normalize content into ContentPart[] so callers can process mixed string/parts
- * message content in a uniform way.
- */
-function toContentParts(content?: string | Array<ContentPart>): Array<ContentPart> {
-  if (content === undefined) {
-    return [];
-  }
-  if (typeof content === 'string') {
-    return [{ type: 'text', text: content } as TextPart];
-  }
-  return content;
-}
-
-/**
- * Concatenate two content fragments represented as text or parts.
- */
-function concatContentParts(
-  part1?: string | Array<ContentPart>,
-  part2?: string | Array<ContentPart>,
-): Array<ContentPart> {
-  return [...toContentParts(part1), ...toContentParts(part2)];
-}
-
-function getContentDigest(
-  content?: string | Array<ContentPart>,
-): string | Array<ContentPart> | undefined {
-  if (content === undefined) return undefined;
-
-  const maxLength = 20;
-  const headLength = 10;
-  const tailLength = 5;
-
-  const digestString = (value: string): string => {
-    if (value.length <= maxLength) {
-      return value;
-    }
-    return `${value.slice(0, headLength)}...${value.slice(-tailLength)}`;
-  };
-
-  const digestValue = (value: unknown): unknown => {
-    if (typeof value === 'string') {
-      return digestString(value);
-    }
-
-    if (Array.isArray(value)) {
-      return value.map((item) => digestValue(item));
-    }
-
-    if (value instanceof Date) {
-      return new Date(value.getTime());
-    }
-
-    if (value && typeof value === 'object') {
-      const digestedObject: Record<string, unknown> = {};
-      for (const [key, fieldValue] of Object.entries(value)) {
-        digestedObject[key] = digestValue(fieldValue);
-      }
-      return digestedObject;
-    }
-
-    return value;
-  };
-
-  return digestValue(content) as string | Array<ContentPart>;
-}
-
-function createProviderToolCallArguments(
-  provider: ModelProvider,
-  rawType: string,
-  rawRequest: unknown,
-): string {
-  return JSON.stringify({ provider, rawType, rawRequest });
-}
-
-export const ContentPart = {
-  toParts: toContentParts,
-  concat: concatContentParts,
-  digest: getContentDigest,
-  createProviderToolCallArguments: createProviderToolCallArguments,
-};
 
 export enum ModelStopReasons {
   STOP = 'stop',
@@ -484,18 +417,6 @@ export type AnthropicApiMessage = {
 };
 
 export type RawMessageType = ChatCompletionApiMessage | ResponseApiMessage | AnthropicApiMessage;
-
-export type RawDeltaMessageType =
-  | ChatCompletionChunk.Choice.Delta
-  | ResponseStreamEvent
-  | RawContentBlockDelta;
-
-export type RawLLMParametersType =
-  | MessageStreamParams
-  | ChatCompletionStreamParams
-  | ResponseCreateParams;
-
-export type RawResponseType = ChatCompletion | Response | Message;
 
 /**
  * The structure used for persistence.

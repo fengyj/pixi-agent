@@ -22,12 +22,13 @@ import {
   DeepSeekChatDialectResolver,
   DeepSeekAnthropicDialectResolver,
 } from './dialects/deepseek';
-import { ChatCompletionTransport } from './chat_completion';
+import { ChatCompletionTransport } from './chat-completion';
 import { AnthropicTransport } from './anthropic';
 import { ResponseTransport } from './response';
 
 export type { ModelOptions, StreamCallbacks, ProviderTransport } from './base';
 export { ModelOptionsSchema } from './base';
+
 
 export function getTransport(
   apiMode: ApiModes,

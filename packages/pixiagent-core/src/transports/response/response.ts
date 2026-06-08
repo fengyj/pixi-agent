@@ -30,6 +30,11 @@ import type {
   ResponseFunctionShellToolCall,
   EasyInputMessage,
   ResponseErrorEvent,
+  ResponseStreamEvent,
+  ResponseFunctionWebSearch,
+  ResponseFileSearchToolCall,
+  ResponseCodeInterpreterToolCall,
+  ResponseFunctionToolCallOutputItem,
 } from 'openai/resources/responses/responses';
 import {
   ApiModes,
@@ -37,11 +42,7 @@ import {
   ContentPart,
   DocumentPart,
   ImagePart,
-  RawDeltaMessageType,
-  RawLLMParametersType,
-  RawResponseType,
   RefusalPart,
-  RoleType,
   SessionMessage,
   TextPart,
   ToolCallPart,
@@ -49,8 +50,9 @@ import {
   ResponseApiMessage,
   ThinkingPart,
   ModelStopReasons,
-} from '../message';
-import { PixiAgentErrorBuilder, ErrorGuards } from '../errors';
+  ServerToolUsePart,
+} from '../../message';
+import { PixiAgentErrorBuilder, ErrorGuards } from '../../errors';
 import {
   DialectResolver,
   ModelOptions,
@@ -58,8 +60,9 @@ import {
   ProviderTransport,
   StreamCallbacks,
   StreamDataExtractor,
-} from './base';
+} from '../base';
 import { randomUUID } from 'crypto';
+import { assertNever } from '../../utils';
 
 export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
   readonly client: OpenAI;
@@ -81,9 +84,9 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
     apiKey?: string,
     dialectResolver?: DialectResolver<
       ResponseApiMessage,
-      RawDeltaMessageType,
-      RawLLMParametersType,
-      RawResponseType
+      ResponseStreamEvent,
+      ResponseCreateParamsStreaming,
+      Response
     >,
   ) {
     super(ApiModes.RESPONSE, dialectResolver);
@@ -108,7 +111,7 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
   }
 
   convertToRawMessage(msg: SessionMessage): ResponseApiMessage {
-    const items = ConvertHelper.toResponseItems(msg.role, msg.content);
+    const items = ConvertHelper.toResponseItems(msg);
     const responseApiMessage: ResponseApiMessage = {
       messageId: msg.messageId,
       type: 'response_api_message',
@@ -336,7 +339,7 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
 
     try {
       const stream = await this.client.responses.create(
-        { ...params, stream: true },
+        params,
         this.getStreamRequestOptions(requestOptions),
       );
 
@@ -537,7 +540,7 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
               (existing, newData) => {
                 existing.text += newData.text;
               },
-              (delta) => delta.text === '' ? null : { type: 'text', text: delta.text },
+              (delta) => (delta.text === '' ? null : { type: 'text', text: delta.text }),
             );
             break;
           }
@@ -579,7 +582,7 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
               (existing, newData) => {
                 existing.refusal += newData.refusal;
               },
-              (delta) => delta.refusal === '' ? null : ConvertHelper.toContentPart(delta),
+              (delta) => (delta.refusal === '' ? null : ConvertHelper.toContentPart(delta)),
             );
             break;
           }
@@ -598,7 +601,7 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
               (existing, newData) => {
                 existing.text += newData.text;
               },
-              (delta) => delta.text === '' ? null : { type: 'thinking', content: delta.text },
+              (delta) => (delta.text === '' ? null : { type: 'thinking', content: delta.text }),
             );
             break;
           }
@@ -667,7 +670,7 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
                 }
                 existing.text += newData.text;
               },
-              (delta) => delta.text === '' ? null : { type: 'thinking', content: delta.text },
+              (delta) => (delta.text === '' ? null : { type: 'thinking', content: delta.text }),
             );
             break;
           }
@@ -691,7 +694,7 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
                 newData.call_id = existing.call_id;
                 newData.name = existing.name;
               },
-              (delta) => delta.arguments === '' ? null : ConvertHelper.toContentPart(delta),
+              (delta) => (delta.arguments === '' ? null : ConvertHelper.toContentPart(delta)),
             );
             break;
           }
@@ -701,29 +704,29 @@ export class ResponseTransport extends ProviderTransport<ResponseApiMessage> {
           case 'response.audio.done':
           case 'response.audio.transcript.delta':
           case 'response.audio.transcript.done':
-          case 'response.code_interpreter_call.completed':
-          case 'response.image_generation_call.completed':
-          case 'response.code_interpreter_call.in_progress':
-          case 'response.code_interpreter_call.interpreting':
           case 'response.code_interpreter_call_code.delta':
           case 'response.code_interpreter_call_code.done':
-          case 'response.image_generation_call.in_progress':
+          case 'response.code_interpreter_call.completed':
+          case 'response.code_interpreter_call.in_progress':
+          case 'response.code_interpreter_call.interpreting':
           case 'response.custom_tool_call_input.delta':
           case 'response.custom_tool_call_input.done':
           case 'response.file_search_call.completed':
           case 'response.file_search_call.in_progress':
-          case 'response.web_search_call.completed':
           case 'response.file_search_call.searching':
+          case 'response.image_generation_call.completed':
           case 'response.image_generation_call.generating':
+          case 'response.image_generation_call.in_progress':
           case 'response.image_generation_call.partial_image':
+          case 'response.mcp_call_arguments.delta':
+          case 'response.mcp_call_arguments.done':
           case 'response.mcp_call.completed':
           case 'response.mcp_call.failed':
           case 'response.mcp_call.in_progress':
-          case 'response.mcp_call_arguments.delta':
-          case 'response.mcp_call_arguments.done':
           case 'response.mcp_list_tools.completed':
           case 'response.mcp_list_tools.failed':
           case 'response.mcp_list_tools.in_progress':
+          case 'response.web_search_call.completed':
           case 'response.web_search_call.in_progress':
           case 'response.web_search_call.searching':
             break;
@@ -818,11 +821,11 @@ const ResponseContentPartHelper = {
    *   and mcp_approval_response are conceptually generic tool calls.
    */
   toContentPartsFromInputItem(item: ResponseInputItem): ContentPart[] {
-    return this.toContentPartsFromResponseItem(item);
+    return ResponseContentPartHelper.toContentPartsFromResponseItem(item);
   },
 
   toContentPartsFromOutputItem(item: ResponseOutputItem): ContentPart[] {
-    return this.toContentPartsFromResponseItem(item);
+    return ResponseContentPartHelper.toContentPartsFromResponseItem(item);
   },
 
   toContentPartsFromResponseItem(item: ResponseInputItem | ResponseOutputItem): ContentPart[] {
@@ -831,7 +834,7 @@ const ResponseContentPartHelper = {
     ): data is EasyInputMessage | ResponseInputItem.Message | ResponseOutputMessage => {
       return (
         data.type === 'message' ||
-        (!data.type &&
+        (!data.type &&  // EasyInputMessage may not have 'type' field
           'content' in data &&
           (typeof data.content === 'string' ||
             (Array.isArray(data.content) &&
@@ -843,7 +846,7 @@ const ResponseContentPartHelper = {
     };
 
     if (isResponseMessageItem(item)) {
-      return this.fromResponseMessageItem(item);
+      return ResponseContentPartHelper.fromResponseMessageItem(item);
     } else if (
       item.type === 'compaction' ||
       item.type === 'compaction_trigger' ||
@@ -853,7 +856,7 @@ const ResponseContentPartHelper = {
       // content that can be mapped to a ContentPart.
       return [];
     } else {
-      const contentPart = this.fromResponseObject(item);
+      const contentPart = ResponseContentPartHelper.fromResponseObject(item);
       if (contentPart) {
         return [contentPart];
       }
@@ -879,7 +882,9 @@ const ResponseContentPartHelper = {
       | ResponseOutputRefusal // ResponseOutputMessage
     > = item.content;
 
-    return contents.map((c) => this.fromResponseObject(c)).filter((part) => part !== null);
+    return contents
+      .map((c) => ResponseContentPartHelper.fromResponseObject(c))
+      .filter((part) => part !== null);
   },
 
   fromResponseObject(
@@ -899,53 +904,51 @@ const ResponseContentPartHelper = {
   ): ContentPart | null {
     switch (item.type) {
       case 'input_text':
-        return this.fromResponseInputText(item);
+        return ResponseContentPartHelper.fromResponseInputText(item);
       case 'output_text':
-        return this.fromResponseOutputText(item);
+        return ResponseContentPartHelper.fromResponseOutputText(item);
       case 'refusal':
-        return this.fromResponseOutputRefusal(item);
+        return ResponseContentPartHelper.fromResponseOutputRefusal(item);
       case 'input_image':
-        return this.fromResponseInputImage(item);
+        return ResponseContentPartHelper.fromResponseInputImage(item);
       case 'input_file':
-        return this.fromResponseInputFile(item);
+        return ResponseContentPartHelper.fromResponseInputFile(item);
       case 'image_generation_call':
-        return this.fromResponseImageGenerationCall(item);
+        return ResponseContentPartHelper.fromResponseImageGenerationCall(item);
       case 'function_call':
-        return this.fromResponseFunctionCall(item);
+        return ResponseContentPartHelper.fromResponseFunctionCall(item);
       case 'function_call_output':
-        return this.fromResponseFunctionCallOutput(item);
+        return ResponseContentPartHelper.fromResponseFunctionCallOutput(item);
       case 'reasoning':
-        return this.fromResponseReasoningItem(item);
-
+        return ResponseContentPartHelper.fromResponseReasoningItem(item);
       case 'computer_call':
       case 'custom_tool_call':
       case 'tool_search_call':
       case 'local_shell_call':
       case 'shell_call':
       case 'apply_patch_call':
-        return this.fromResponseSpecificToolCall(item);
+        return ResponseContentPartHelper.fromResponseSpecificToolCall(item);
       case 'computer_call_output':
       case 'custom_tool_call_output':
       case 'tool_search_output':
       case 'local_shell_call_output':
       case 'shell_call_output':
       case 'apply_patch_call_output':
-        return this.fromResponseSpecificToolOutput(item);
+        return ResponseContentPartHelper.fromResponseSpecificToolOutput(item);
       // server tool calls (which includes the request argument and the response output)
       case 'file_search_call': // ResponseFileSearchToolCall
       case 'web_search_call': // ResponseFunctionWebSearch
       case 'code_interpreter_call': // ResponseCodeInterpreterToolCall
       case 'mcp_call': // ResponseInputItem.McpCall | ResponseOutputItem.McpCall
       case 'mcp_list_tools': // ResponseInputItem.McpListTools | ResponseOutputItem.McpListTools
-        return null; // todo: consider a generic server side tool call part
+        return ResponseContentPartHelper.fromResponseServerToolCall(item);
       case 'mcp_approval_request': // ResponseInputItem.McpApprovalRequest | ResponseOutputItem.McpApprovalRequest
       case 'mcp_approval_response': // ResponseInputItem.McpApprovalResponse | ResponseOutputItem.McpApprovalResponse
       case 'compaction': // ResponseCompactionItemParam | ResponseCompactionItem
       case 'compaction_trigger': // ResponseInputItem.CompactionTrigger
-      case 'item_reference': // ResponseInputItem.ItemReference | ResponseOutputItem.ItemReference
         return null; // todo: how to handle these types?
+      case 'item_reference': // ResponseInputItem.ItemReference | ResponseOutputItem.ItemReference
       case null: // ResponseInputItem.ItemReference
-        return null;
       case undefined: // ResponseInputItem.ItemReference
         return null;
       default:
@@ -1015,7 +1018,7 @@ const ResponseContentPartHelper = {
     return {
       type: 'text',
       text: item.text,
-      citations: item.annotations?.flatMap(this.fromAnnotation) ?? [],
+      citations: item.annotations?.flatMap(ResponseContentPartHelper.fromAnnotation) ?? [],
     } as TextPart;
   },
 
@@ -1058,7 +1061,9 @@ const ResponseContentPartHelper = {
       type: 'tool_result',
       id: item.call_id,
       result: JSON.stringify(
-        item.output.map((c) => this.fromResponseObject(c)).filter((part) => part !== undefined),
+        item.output
+          .map((c) => ResponseContentPartHelper.fromResponseObject(c))
+          .filter((part) => part !== undefined),
       ),
     };
   },
@@ -1098,21 +1103,24 @@ const ResponseContentPartHelper = {
       | ResponseFunctionShellToolCall
       | ResponseInputItem.ApplyPatchCall
       | ResponseApplyPatchToolCall,
-  ): ToolCallPart {
-    switch (item.type) {
-      case 'computer_call':
-      case 'custom_tool_call':
-      case 'tool_search_call':
-      case 'local_shell_call':
-      case 'shell_call':
-      case 'apply_patch_call':
-        return {
-          type: 'tool_call',
-          id: item.call_id ?? 'tool_search_call_id', // the tool search call id may not be provided
-          name: item.type,
-          arguments: JSON.stringify(item),
-          providerSpecific: ApiModes.RESPONSE,
-        };
+  ): ToolCallPart | ServerToolUsePart {
+    if ('call_id' in item && item.call_id) {
+      const { call_id, type, ...rest } = item;
+      return {
+        type: 'tool_call',
+        id: call_id,
+        name: type,
+        arguments: JSON.stringify(rest),
+        providerSpecific: ApiModes.RESPONSE,
+      };
+    } else {
+      const { type, ...rest } = item;
+      return {
+        type: 'server_tool_use',
+        name: type,
+        data: JSON.stringify(rest),
+        providerSpecific: ApiModes.RESPONSE,
+      };
     }
   },
 
@@ -1130,14 +1138,42 @@ const ResponseContentPartHelper = {
       | ResponseFunctionShellToolCallOutput
       | ResponseInputItem.ApplyPatchCallOutput
       | ResponseApplyPatchToolCallOutput,
-  ): ToolResultPart {
+  ): ToolResultPart | ServerToolUsePart {
+    if ('call_id' in item && item.call_id) {
+      const { call_id, type, ...rest } = item;
+      return {
+        type: 'tool_result',
+        id: call_id,
+        name: type,
+        result: JSON.stringify(rest),
+        providerSpecific: ApiModes.RESPONSE,
+      };
+    } else {
+      const { type, ...rest } = item;
+      return {
+        type: 'server_tool_use',
+        name: type,
+        data: JSON.stringify(rest),
+        providerSpecific: ApiModes.RESPONSE,
+      };
+    }
+  },
+
+  fromResponseServerToolCall(
+    item:
+      | ResponseFileSearchToolCall
+      | ResponseFunctionWebSearch
+      | ResponseCodeInterpreterToolCall
+      | ResponseInputItem.McpCall
+      | ResponseOutputItem.McpCall
+      | ResponseInputItem.McpListTools
+      | ResponseOutputItem.McpListTools,
+  ): ServerToolUsePart {
+    const { type, ...rest } = item;
     return {
-      type: 'tool_result',
-      // the tool call id may not be provided
-      // the local shell output doesn't contain the call_id, but the LocalShellCall has.
-      id: 'call_id' in item ? (item.call_id ?? 'tool_result_call_id') : '',
-      name: item.type,
-      result: JSON.stringify(item),
+      type: 'server_tool_use',
+      name: type,
+      data: JSON.stringify(rest),
       providerSpecific: ApiModes.RESPONSE,
     };
   },
@@ -1198,180 +1234,509 @@ const ResponseContentPartHelper = {
 };
 
 const ContentPartResponseHelper = {
-  toResponseItems(
-    role: RoleType,
-    content: string | ContentPart[],
-  ): Array<ResponseInputItem | ResponseOutputItem> {
-    if (typeof content === 'string') {
-      return [
-        ContentPartResponseHelper.toResponseMessage(role === 'tool' ? 'user' : role, [
-          { type: 'text', text: content } as TextPart,
-        ]),
-      ];
+  toResponseItems(message: SessionMessage): Array<ResponseInputItem | ResponseOutputItem> {
+    if (message.role === 'assistant') {
+      return ContentPartResponseHelper.toResponseOutputItems(
+        message as Extract<SessionMessage, { role: 'assistant' }>,
+      );
+    } else {
+      return ContentPartResponseHelper.toResponseInputItems(
+        message as Extract<SessionMessage, { role: 'user' | 'tool' }>,
+      );
+    }
+  },
+  toResponseInputItems(
+    message: Omit<SessionMessage, 'role'> & { role: 'user' | 'tool' },
+  ): ResponseInputItem[] {
+    if (typeof message.content === 'string') {
+      return [ContentPartResponseHelper.toInputMessage(message.content)];
+    }
+    const items = Array<
+      | Exclude<
+          ResponseInputItem,
+          ResponseOutputMessage | EasyInputMessage | ResponseInputItem.Message
+        >
+      | ResponseInputText
+      | ResponseInputImage
+      | ResponseInputFile
+    >();
+    for (const part of message.content) {
+      switch (part.type) {
+        case 'text':
+          items.push(ContentPartResponseHelper.toInputText(part));
+          break;
+        case 'image': {
+          items.push(ContentPartResponseHelper.toInputImage(part));
+          break;
+        }
+        case 'document':
+          items.push(ContentPartResponseHelper.toInputFile(part));
+          break;
+        case 'tool_call':
+          items.push(ContentPartResponseHelper.toToolCall(part as ToolCallPart));
+          break;
+        case 'tool_result':
+          items.push(ContentPartResponseHelper.toToolResult(part as ToolResultPart));
+          break;
+        case 'server_tool_use':
+          items.push(
+            ContentPartResponseHelper.toItemFromServerToolUseForInput(part as ServerToolUsePart),
+          );
+          break;
+        case 'audio':
+        case 'video':
+        case 'refusal':
+        case 'thinking':
+          break;
+        default:
+          assertNever(part);
+      }
     }
 
-    const items: Array<ResponseInputItem | ResponseOutputItem> = [];
-    const effectiveRole: Exclude<RoleType, 'tool'> = role === 'tool' ? 'user' : role;
-    let currentMessageParts: Array<TextPart | ImagePart | DocumentPart | RefusalPart> = [];
+    const itemsForMessage: Array<ResponseInputText | ResponseInputImage | ResponseInputFile> = [];
+    const inputItems: Array<ResponseInputItem> = [];
 
-    const flushMessage = () => {
-      if (currentMessageParts.length === 0) {
-        return;
+    const generateMessage = (): void => {
+      if (itemsForMessage.length > 0) {
+        inputItems.push(ContentPartResponseHelper.toInputMessage(itemsForMessage));
+        itemsForMessage.length = 0;
       }
-      items.push(ContentPartResponseHelper.toResponseMessage(effectiveRole, currentMessageParts));
-      currentMessageParts = [];
     };
 
-    for (const part of content) {
-      if (
-        part.type === 'tool_call' ||
-        part.type === 'tool_result' ||
-        (part.type === 'image' && role === 'assistant')
-      ) {
-        const standalone = ContentPartResponseHelper.toStandaloneResponseItem(part, role);
-        if (standalone) {
-          flushMessage();
-          items.push(standalone);
+    for (const item of items) {
+      switch (item.type) {
+        case 'input_text':
+        case 'input_image':
+        case 'input_file':
+          itemsForMessage.push(item);
+          break;
+        default:
+          generateMessage();
+          inputItems.push(item);
+      }
+    }
+    return inputItems;
+  },
+  toResponseOutputItems(
+    message: Omit<SessionMessage, 'role'> & { role: 'assistant' },
+  ): ResponseOutputItem[] {
+    if (typeof message.content === 'string') {
+      return [ContentPartResponseHelper.toOutputMessage(message.messageId, message.content)];
+    }
+    const items = Array<
+      | Exclude<ResponseOutputItem, ResponseOutputMessage>
+      | ResponseOutputText
+      | ResponseOutputRefusal
+    >();
+    for (const part of message.content) {
+      switch (part.type) {
+        case 'text':
+          items.push(ContentPartResponseHelper.toOutputText(part));
+          break;
+        case 'refusal':
+          items.push(ContentPartResponseHelper.toRefusal(part));
+          break;
+        case 'thinking':
+          items.push(ContentPartResponseHelper.toThinking(part));
+          break;
+        case 'image': {
+          switch (part.image.sourceType) {
+            case 'base64':
+              items.push(
+                ContentPartResponseHelper.toImageGenerationCall(
+                  part as ImagePart & { image: { sourceType: 'base64' } },
+                ),
+              );
+              break;
+            default:
+              break;
+          }
+          break;
         }
-      } else if (
-        part.type === 'text' ||
-        part.type === 'refusal' ||
-        part.type === 'image' ||
-        part.type === 'document'
-      ) {
-        const messageCompatible = ContentPartResponseHelper.toResponseMessageContentPart(
-          part,
-          effectiveRole,
-        );
-        if (messageCompatible) {
-          currentMessageParts.push(part);
-        }
+        case 'tool_call':
+          items.push(ContentPartResponseHelper.toToolCall(part as ToolCallPart));
+          break;
+        case 'tool_result':
+          items.push(ContentPartResponseHelper.toToolResultForOutputItem(part as ToolResultPart));
+          break;
+        case 'server_tool_use':
+          items.push(ContentPartResponseHelper.toItemFromServerToolUse(part as ServerToolUsePart));
+          break;
+        case 'audio':
+        case 'document':
+        case 'video':
+          break;
+        default:
+          assertNever(part);
       }
     }
 
-    flushMessage();
-    return items;
+    const itemsForMessage: Array<ResponseOutputText | ResponseOutputRefusal> = [];
+    const itemsForThinking: Array<ResponseReasoningItem> = [];
+    const outputItems: Array<ResponseOutputItem> = [];
+
+    const generateMessage = (): void => {
+      if (itemsForMessage.length > 0) {
+        outputItems.push(
+          ContentPartResponseHelper.toOutputMessage(
+            `${message.messageId}_${outputItems.length}`,
+            itemsForMessage,
+          ),
+        );
+        itemsForMessage.length = 0;
+      }
+    };
+    const generateThinkingItem = (): void => {
+      if (itemsForThinking.length > 0) {
+        outputItems.push({
+          id: `${message.messageId}_${outputItems.length}`,
+          type: 'reasoning',
+          summary: itemsForThinking.flatMap((i) => i.summary),
+        } as ResponseReasoningItem);
+        itemsForThinking.length = 0;
+      }
+    };
+
+    for (const item of items) {
+      switch (item.type) {
+        case 'output_text':
+        case 'refusal':
+          generateThinkingItem();
+          itemsForMessage.push(item);
+          break;
+        case 'reasoning':
+          generateMessage();
+          itemsForThinking.push(item);
+          break;
+        default:
+          generateThinkingItem();
+          generateMessage();
+          outputItems.push(item);
+      }
+    }
+    return outputItems;
   },
-
-  toResponseMessage(
-    role: Exclude<RoleType, 'tool'>,
-    parts: Array<TextPart | ImagePart | DocumentPart | RefusalPart>,
-  ): ResponseInputItem.Message | ResponseOutputMessage {
-    const content = parts
-      .map((part) => ContentPartResponseHelper.toResponseMessageContentPart(part, role))
-      .filter((item) => item !== null);
-
-    if (role === 'assistant') {
+  toOutputMessage(
+    id: string,
+    items: string | Array<ResponseOutputText | ResponseOutputRefusal>,
+  ): ResponseOutputMessage {
+    if (typeof items === 'string') {
       return {
+        id: id,
         type: 'message',
         role: 'assistant',
+        content: [
+          {
+            type: 'output_text',
+            text: items,
+            annotations: [],
+          } as ResponseOutputText,
+        ],
         status: 'completed',
-        content,
-      } as ResponseOutputMessage;
+      };
     }
-
+    return {
+      id: id,
+      type: 'message',
+      role: 'assistant',
+      content: items,
+      status: 'completed',
+    };
+  },
+  toInputMessage(
+    content: string | Array<ResponseInputText | ResponseInputImage | ResponseInputFile>,
+  ): EasyInputMessage | ResponseInputItem.Message {
+    if (typeof content === 'string') {
+      return {
+        type: 'message',
+        role: 'user',
+        content: content,
+      };
+    }
     return {
       type: 'message',
       role: 'user',
       content,
-    } as ResponseInputItem.Message;
+    };
   },
 
-  toResponseMessageContentPart(
-    part: TextPart | RefusalPart | ImagePart | DocumentPart,
-    role: Exclude<RoleType, 'tool'>,
+  toOutputText(part: TextPart): ResponseOutputText {
+    return {
+      type: 'output_text',
+      text: part.text,
+      annotations: (part.citations ?? [])
+        .map((c) => ContentPartResponseHelper.toAnnotation(c))
+        .filter((a) => a !== null),
+    };
+  },
+  toRefusal(part: RefusalPart): ResponseOutputRefusal {
+    return {
+      type: 'refusal',
+      refusal: part.reason,
+    };
+  },
+  toItemFromServerToolUse(
+    part: ServerToolUsePart,
+  ):
+    | ResponseOutputText
+    | ResponseFileSearchToolCall
+    | ResponseFunctionWebSearch
+    | ResponseCodeInterpreterToolCall
+    | ResponseComputerToolCall
+    | ResponseCustomToolCall
+    | ResponseOutputItem.McpCall
+    | ResponseOutputItem.McpListTools
+    | ResponseComputerToolCallOutputItem
+    | ResponseCustomToolCallOutputItem
+    | ResponseToolSearchOutputItem
+    | ResponseOutputItem.LocalShellCallOutput
+    | ResponseFunctionShellToolCallOutput
+    | ResponseApplyPatchToolCallOutput
+    | ResponseToolSearchCall
+    | ResponseOutputItem.LocalShellCall
+    | ResponseFunctionShellToolCall
+    | ResponseApplyPatchToolCall {
+    if (part.providerSpecific === ApiModes.RESPONSE) {
+      try {
+        return {
+          ...JSON.parse(part.data ?? '{}'),
+          type: part.name,
+          call_id: part.id,
+        };
+      } catch {
+        // empty
+      }
+    }
+    return {
+      type: 'output_text',
+      text: `Tool use: ${part.name} with data ${part.data}`,
+      annotations: [],
+    };
+  },
+
+  toItemFromServerToolUseForInput(
+    part: ServerToolUsePart,
   ):
     | ResponseInputText
-    | ResponseInputImage
-    | ResponseInputFile
-    | ResponseOutputText
-    | ResponseOutputRefusal
-    | null {
-    switch (part.type) {
-      case 'text': {
-        if (role === 'assistant') {
-          return {
-            type: 'output_text',
-            text: part.text,
-            annotations: (part.citations ?? [])
-              .map((c) => ContentPartResponseHelper.convertCitationToResponseAnnotation(c))
-              .filter((a) => a !== null),
-          };
-        } else {
-          return {
-            type: 'input_text',
-            text: part.text,
-          };
-        }
+    | ResponseFileSearchToolCall
+    | ResponseFunctionWebSearch
+    | ResponseCodeInterpreterToolCall
+    | ResponseComputerToolCall
+    | ResponseCustomToolCall
+    | ResponseInputItem.McpCall
+    | ResponseInputItem.McpListTools
+    | ResponseInputItem.ComputerCallOutput
+    | ResponseCustomToolCallOutput
+    | ResponseToolSearchOutputItemParam
+    | ResponseInputItem.LocalShellCallOutput
+    | ResponseInputItem.ShellCallOutput
+    | ResponseInputItem.ApplyPatchCallOutput
+    | ResponseInputItem.ToolSearchCall
+    | ResponseInputItem.LocalShellCall
+    | ResponseInputItem.ShellCall
+    | ResponseInputItem.ApplyPatchCall {
+    if (part.providerSpecific === ApiModes.RESPONSE) {
+      try {
+        return {
+          ...JSON.parse(part.data ?? '{}'),
+          type: part.name,
+          call_id: part.id,
+        };
+      } catch {
+        // empty
       }
-      case 'refusal': {
-        return role === 'assistant'
-          ? {
-              type: 'refusal',
-              refusal: part.reason,
-            }
-          : null;
-      }
-      case 'image': {
-        return role === 'assistant'
-          ? null
-          : ContentPartResponseHelper.convertToResponseInputImageContent(part);
-      }
-      case 'document': {
-        return role === 'assistant'
-          ? null
-          : ContentPartResponseHelper.convertToResponseInputFileContent(part);
-      }
-      default:
-        assertNever(part);
     }
+    return {
+      type: 'input_text',
+      text: `Tool use: ${part.name} with data ${part.data}`,
+    };
   },
+  toImageGenerationCall(
+    part: ImagePart & { image: { sourceType: 'base64' } },
+  ): ResponseOutputItem.ImageGenerationCall {
+    return {
+      type: 'image_generation_call',
+      id: randomUUID(),
+      result: part.image.data,
+      status: part.image.data === '' ? 'failed' : 'completed',
+    } as ResponseOutputItem.ImageGenerationCall;
+  },
+  toToolCall(part: ToolCallPart): ResponseFunctionToolCall {
+    if (part.providerSpecific === ApiModes.RESPONSE) {
+      return {
+        ...JSON.parse(part.arguments),
+        type: part.name,
+        call_id: part.id,
+      };
+    }
+    return {
+      type: 'function_call',
+      id: part.id,
+      call_id: part.id,
+      name: part.name,
+      arguments: part.arguments,
+    } as ResponseFunctionToolCall;
+  },
+  toToolResult(part: ToolResultPart):
+    | ResponseInputItem.FunctionCallOutput
+    // they are provider specific function calls below.
+    | ResponseInputItem.ComputerCallOutput
+    | ResponseCustomToolCallOutput
+    | ResponseToolSearchOutputItemParam
+    | ResponseInputItem.LocalShellCallOutput
+    | ResponseInputItem.ShellCallOutput
+    | ResponseInputItem.ApplyPatchCallOutput {
+    try {
+      const parsedResult = !part.result || part.result === '' ? null : JSON.parse(part.result);
 
-  toStandaloneResponseItem(
-    part: ToolCallPart | ToolResultPart | ImagePart,
-    role: RoleType,
-  ): ResponseInputItem | ResponseOutputItem | null {
-    switch (part.type) {
-      case 'tool_call': {
+      if (part.providerSpecific === ApiModes.RESPONSE) {
         return {
-          type: 'function_call',
-          id: part.id,
+          ...parsedResult,
+          type: part.name,
           call_id: part.id,
-          name: part.name,
-          arguments: part.arguments,
-          status: 'completed',
-        } as ResponseFunctionToolCall;
+        };
       }
-      case 'tool_result': {
-        return {
-          type: 'function_call_output',
-          call_id: part.id,
-          output: part.result ?? '',
-          status: 'completed',
-        } as ResponseInputItem.FunctionCallOutput;
-      }
-      case 'image': {
-        if (
-          role === 'assistant' &&
-          (part.image.sourceType === 'base64' || part.image.sourceType === 'file_id')
-        ) {
+
+      if (parsedResult && Array.isArray(parsedResult)) {
+        const convertable = parsedResult.every((c) => {
+          if (!('type' in c)) return false;
+          switch (c.type) {
+            case 'text':
+              return 'text' in c && typeof c.text === 'string';
+            case 'image':
+              return (
+                ('image_url' in c && typeof c.image_url === 'string') ||
+                ('file_id' in c && typeof c.file_id === 'string')
+              );
+            case 'document':
+              return (
+                ('file_url' in c && typeof c.file_url === 'string') ||
+                ('file_data' in c && typeof c.file_data === 'string') ||
+                ('file_id' in c && typeof c.file_id === 'string')
+              );
+            default:
+              return false;
+          }
+        });
+        if (convertable) {
+          const outputParts = parsedResult.map((c) => c as TextPart | ImagePart | DocumentPart);
           return {
-            type: 'image_generation_call',
-            id: part.image.sourceType === 'file_id' ? part.image.fileId : randomUUID(),
-            result: part.image.sourceType === 'base64' ? part.image.data : null,
+            type: 'function_call_output',
+            call_id: part.id,
+            output: outputParts
+              .map((c) => {
+                switch (c.type) {
+                  case 'text':
+                    return ContentPartResponseHelper.toInputText(c);
+                  case 'image':
+                    return ContentPartResponseHelper.toInputImage(c);
+                  case 'document':
+                    return ContentPartResponseHelper.toInputFile(c);
+                  default:
+                    assertNever(c);
+                }
+              })
+              .filter((item) => item !== null) as Array<ResponseInputText | ResponseInputImage>,
             status: 'completed',
-          } as ResponseOutputItem.ImageGenerationCall;
-        } else {
-          return null;
+          };
         }
       }
-      default: {
-        assertNever(part);
-      }
+    } catch {
+      // empty
+    }
+    return {
+      type: 'function_call_output',
+      call_id: part.id,
+      output: part.result ?? '',
+      status: 'completed',
+    };
+  },
+  toToolResultForOutputItem(part: ToolResultPart):
+    | ResponseFunctionToolCallOutputItem
+    // they are provider specific function calls below.
+    | ResponseComputerToolCallOutputItem
+    | ResponseCustomToolCallOutputItem
+    | ResponseToolSearchOutputItem
+    | ResponseOutputItem.LocalShellCallOutput
+    | ResponseFunctionShellToolCallOutput
+    | ResponseApplyPatchToolCallOutput {
+    const { id, ...rest } = ContentPartResponseHelper.toToolResult(part);
+    switch (rest.type) {
+      case 'computer_call_output':
+        return {
+          ...rest,
+          id: id ?? '',
+          status: rest.status ?? 'completed',
+          acknowledged_safety_checks: rest.acknowledged_safety_checks ?? undefined,
+        };
+      case 'apply_patch_call_output':
+        return {
+          ...rest,
+          id: id ?? '',
+        };
+      case 'local_shell_call_output':
+        return {
+          ...rest,
+          id: id ?? '',
+        };
+      case 'shell_call_output':
+        return {
+          ...rest,
+          id: id ?? '',
+          status: rest.status && rest.status !== 'completed' ? 'incomplete' : 'completed',
+          max_output_length: rest.max_output_length ?? null,
+        };
+      case 'tool_search_output':
+        return {
+          ...rest,
+          id: id ?? '',
+          status: rest.status && rest.status !== 'completed' ? 'incomplete' : 'completed',
+          call_id: rest.call_id ?? '',
+          execution: rest.execution ?? 'server',
+        };
+      case 'function_call_output':
+        return {
+          ...rest,
+          id: id ?? '',
+          status: rest.status && rest.status !== 'completed' ? 'incomplete' : 'completed',
+          output:
+            typeof rest.output === 'string'
+              ? rest.output
+              : rest.output.map((c) => {
+                  switch (c.type) {
+                    case 'input_text':
+                      return c as ResponseInputText;
+                    case 'input_image':
+                      return c as ResponseInputImage;
+                    case 'input_file':
+                      return c as ResponseInputFile;
+                    default:
+                      assertNever(c);
+                  }
+                }),
+        };
+      case 'custom_tool_call_output':
+        return {
+          ...rest,
+          id: id ?? '',
+          status: 'completed',
+        };
     }
   },
-
-  convertToResponseInputImageContent(part: ImagePart): ResponseInputImage {
+  toThinking(part: ThinkingPart): ResponseReasoningItem {
+    return {
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: part.content }],
+      id: '',
+    };
+  },
+  toInputText(part: TextPart): ResponseInputText {
+    return {
+      type: 'input_text',
+      text: part.text,
+    };
+  },
+  toInputImage(part: ImagePart): ResponseInputImage {
     switch (part.image.sourceType) {
       case 'base64': {
         return {
@@ -1399,7 +1764,7 @@ const ContentPartResponseHelper = {
     }
   },
 
-  convertToResponseInputFileContent(part: DocumentPart): ResponseInputFile {
+  toInputFile(part: DocumentPart): ResponseInputFile {
     const source = part.document;
     switch (source.sourceType) {
       case 'url': {
@@ -1428,7 +1793,7 @@ const ContentPartResponseHelper = {
     }
   },
 
-  convertCitationToResponseAnnotation(
+  toAnnotation(
     citation: Citation,
   ):
     | ResponseOutputText.FileCitation
@@ -1487,30 +1852,9 @@ const ContentPartResponseHelper = {
 };
 
 export const ConvertHelper = {
-  toContentParts: (item: ResponseInputItem | ResponseOutputItem): ContentPart[] =>
-    ResponseContentPartHelper.toContentPartsFromResponseItem(item),
-  toContentPart: (
-    item:
-      | Exclude<
-          ResponseInputItem,
-          EasyInputMessage | ResponseInputItem.Message | ResponseOutputMessage
-        >
-      | Exclude<ResponseOutputItem, ResponseOutputMessage>
-      | ResponseOutputText
-      | ResponseInputText
-      | ResponseOutputRefusal
-      | ResponseInputImage
-      | ResponseInputImageContent
-      | ResponseInputFile
-      | ResponseInputFileContent,
-  ): ContentPart | null => ResponseContentPartHelper.fromResponseObject(item),
-  toResponseItems: (
-    role: RoleType,
-    content: string | ContentPart[],
-  ): Array<ResponseInputItem | ResponseOutputItem> =>
-    ContentPartResponseHelper.toResponseItems(role, content),
+  toContentParts: ResponseContentPartHelper.toContentPartsFromResponseItem,
+  toContentPart: ResponseContentPartHelper.fromResponseObject,
+  toResponseInputItems: ContentPartResponseHelper.toResponseInputItems,
+  toResponseOutputItems: ContentPartResponseHelper.toResponseOutputItems,
+  toResponseItems: ContentPartResponseHelper.toResponseItems,
 };
-
-function assertNever(x: never): never {
-  throw new Error(`Unexpected object: ${x}`);
-}
