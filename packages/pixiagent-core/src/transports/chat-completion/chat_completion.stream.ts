@@ -6,6 +6,7 @@ import type {
 import type { DialectResolver, StreamCallbacks } from '../base';
 import { StreamDataExtractor } from '../base';
 import type { ChatCompletionApiMessage } from '../../message';
+import { PixiAgentErrorBuilder } from '../../errors';
 
 export class ChatCompletionStreamProcessor {
   constructor(
@@ -15,6 +16,7 @@ export class ChatCompletionStreamProcessor {
       never,
       ChatCompletion
     >,
+    private readonly clientBaseUrl?: string,
   ) {}
 
   async process(
@@ -23,7 +25,7 @@ export class ChatCompletionStreamProcessor {
   ): Promise<ChatCompletion> {
     const streamDataExtractor = new StreamDataExtractor(
       {
-      object: 'chat.completion',
+        object: 'chat.completion',
         id: '',
         model: '',
         created: Date.now() / 1000,
@@ -62,7 +64,7 @@ export class ChatCompletionStreamProcessor {
     if (chunk.usage) {
       streamDataExtractor.accumulatedData.usage = chunk.usage;
     }
-    if (chunk.id ) {
+    if (chunk.id) {
       streamDataExtractor.accumulatedData.id = chunk.id;
     }
     streamDataExtractor.accumulatedData.model = chunk.model;
@@ -74,7 +76,11 @@ export class ChatCompletionStreamProcessor {
     }
 
     if (this.dialectResolver) {
-      await this.dialectResolver.extractFromDelta('reasoning', choice.delta, streamDataExtractor as never);
+      await this.dialectResolver.extractFromDelta(
+        'reasoning',
+        choice.delta,
+        streamDataExtractor as never,
+      );
     }
 
     await this.applyTextDelta(choice.delta, streamDataExtractor);
@@ -157,12 +163,30 @@ export class ChatCompletionStreamProcessor {
           } as ChatCompletionMessageFunctionToolCall,
         },
         (accumulated, newData) => {
-          (accumulated.choices[0] as { message: { tool_calls: unknown[] | undefined } }).message.tool_calls ??= [];
-          (accumulated.choices[0] as { message: { tool_calls: unknown[] } }).message.tool_calls.push(newData);
+          (
+            accumulated.choices[0] as { message: { tool_calls: unknown[] | undefined } }
+          ).message.tool_calls ??= [];
+          const tool_calls = accumulated.choices[0].message
+            .tool_calls as Array<ChatCompletionMessageFunctionToolCall>;
+          if (tool_calls.length <= tc.index) {
+            PixiAgentErrorBuilder.modelResponseError(
+              `Received tool call index ${tc.index} out of order or with gaps. Current tool_calls length: ${tool_calls.length}`,
+              this.clientBaseUrl,
+            );
+          }
+          (
+            accumulated.choices[0] as { message: { tool_calls: unknown[] } }
+          ).message.tool_calls.push(newData);
         },
         (existing, newData) => {
-          const existingCall = existing as { id?: string; function?: { name?: string; arguments?: string } };
-          const newCall = newData as { id?: string; function?: { name?: string; arguments?: string } };
+          const existingCall = existing as {
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          };
+          const newCall = newData as {
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          };
           existingCall.id = existingCall.id || newCall.id || '';
           existingCall.function = existingCall.function ?? { name: '', arguments: '' };
           existingCall.function.name = existingCall.function.name || newCall.function?.name || '';
