@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ResponseTransport, ConvertHelper } from './response';
+import { ResponseTransport } from './response';
 import type {
   ResponseApiMessage,
   SessionMessage,
@@ -8,6 +8,7 @@ import type {
   ResponseInputItem,
   ResponseOutputItem,
 } from 'openai/resources/responses/responses';
+import { ResponseConversionHelper } from './response-conversion';
 
 describe('ResponseTransport conversion', () => {
   const transport = new ResponseTransport(undefined, 'test-api-key');
@@ -174,7 +175,7 @@ describe('ConvertHelper conversion', () => {
       content: [{ type: 'input_text', text: 'hello world' }],
     };
 
-    expect(ConvertHelper.toContentParts(item)).toEqual([
+    expect(ResponseConversionHelper.toContentParts(item)).toEqual([
       {
         type: 'text',
         text: 'hello world',
@@ -192,7 +193,7 @@ describe('ConvertHelper conversion', () => {
       status: 'completed',
     };
 
-    expect(ConvertHelper.toContentParts(item)).toEqual([
+    expect(ResponseConversionHelper.toContentParts(item)).toEqual([
       {
         type: 'tool_call',
         id: 'call-1',
@@ -203,7 +204,7 @@ describe('ConvertHelper conversion', () => {
   });
 
   it('builds response items from content parts for a user role', () => {
-    const items = ConvertHelper.toResponseItems('user', [
+    const items = ResponseConversionHelper.toResponseItems('user', [
       { type: 'text', text: 'user message' },
       {
         type: 'image',
@@ -231,7 +232,7 @@ describe('ConvertHelper conversion', () => {
   });
 
   it('builds response items from content parts for an assistant role with a tool call', () => {
-    const items = ConvertHelper.toResponseItems('assistant', [
+    const items = ResponseConversionHelper.toResponseItems('assistant', [
       {
         type: 'tool_call',
         id: 'tool-1',

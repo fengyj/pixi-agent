@@ -730,7 +730,7 @@ export class PixiAgent {
           this.transportCache.set(tKey, t);
         }
         const sessionMsg = isAssistantMessage
-          ? t.convertFromRawMessage(msg.rawMessage as RawMessageType)
+          ? this.convertFromRawMessage(t, msg.rawMessage as RawMessageType)
           : (msg.rawMessage as SessionMessage);
         const converted = transport.convertToRawMessage(sessionMsg);
         this.convertedMessagesCache.set(msg.internalMessageId, converted);
@@ -744,6 +744,19 @@ export class PixiAgent {
       }
     }
     return messages;
+  }
+
+  private convertFromRawMessage(
+    transport: ProviderTransport<RawMessageType>,
+    rawMessage: RawMessageType): SessionMessage {
+    const msg = transport.convertFromRawMessage(rawMessage as RawMessageType);
+    if(Array.isArray(msg.content)) {
+      if(msg.content.some((part) => part.type === 'thinking')) {
+        // the thinking data from the other model or provider is not acceptable.
+        msg.content = msg.content.filter((part) => part.type !== 'thinking');
+      }
+    }
+    return msg;
   }
 
   private toRawMessageArray(rawMessage: RawMessageType | RawMessageType[]): RawMessageType[] {

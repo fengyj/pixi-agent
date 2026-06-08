@@ -29,7 +29,6 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
   private static readonly OFFICIAL_BASE_URL = 'https://api.openai.com/v1';
   private readonly configuredBaseUrl?: string;
   private readonly messageConverter = new ChatCompletionMessageConverter();
-  private readonly streamProcessor = new ChatCompletionStreamProcessor(this.dialectResolver as never);
 
   private static normalizeBaseUrl(baseUrl?: string): string | undefined {
     if (!baseUrl) return baseUrl;
@@ -64,7 +63,9 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
 
   convertFromRawMessage(rawMsg: ChatCompletionApiMessage): SessionMessage {
     const message = this.messageConverter.convertFromRawMessage(rawMsg);
-    return this.dialectResolver ? this.dialectResolver.manipulateMessage(message, rawMsg) : message;
+    return this.dialectResolver
+      ? this.dialectResolver.manipulateMessage(message, rawMsg)
+      : message;
   }
 
   convertToRawMessage(msg: SessionMessage): ChatCompletionApiMessage | ChatCompletionApiMessage[] {
@@ -151,7 +152,8 @@ export class ChatCompletionTransport extends ProviderTransport<ChatCompletionApi
         { ...params, stream: true },
         this.getStreamRequestOptions(requestOptions),
       );
-      const response = await this.streamProcessor.process(
+      const streamProcessor = new ChatCompletionStreamProcessor(this.dialectResolver as never);
+      const response = await streamProcessor.process(
         stream as AsyncIterable<ChatCompletionChunk>,
         callbacks,
       );

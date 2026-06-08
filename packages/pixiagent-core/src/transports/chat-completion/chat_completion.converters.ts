@@ -42,6 +42,7 @@ export class ChatCompletionMessageConverter {
 }
 
 class ChatCompletionRawMessageConverter {
+
   convertFromRawMessage(rawMsg: ChatCompletionApiMessage): SessionMessage {
     switch (rawMsg.content.role) {
       case 'assistant':
@@ -150,39 +151,6 @@ class ChatCompletionRawMessageConverter {
         providerSpecific: ApiModes.COMPLETIONS,
       } as ToolCallPart);
     });
-  }
-
-  private toSimpleAssistantSessionMessage(
-    rawMsg: ChatCompletionApiMessage,
-    msg: ChatCompletionAssistantMessageParam,
-  ): SessionMessage {
-    const annotations =
-      'annotations' in msg && Array.isArray(msg.annotations)
-        ? this.convertAnnotations(msg.annotations)
-        : undefined;
-    if ('refusal' in msg && msg.refusal) {
-      const contents = [];
-      contents.push({ type: 'refusal', reason: msg.refusal } as RefusalPart);
-      if (typeof msg.content === 'string' && msg.content.length > 0) {
-        contents.push({ type: 'text', text: msg.content, citations: annotations } as TextPart);
-      }
-      return {
-        messageId: rawMsg.messageId,
-        type: 'session_message',
-        role: 'assistant',
-        content: contents,
-        name: msg.name,
-        metadata: rawMsg.metadata,
-      } as SessionMessage;
-    }
-    return {
-      messageId: rawMsg.messageId,
-      type: 'session_message',
-      role: 'assistant',
-      content: msg.content,
-      name: msg.name,
-      metadata: rawMsg.metadata,
-    } as SessionMessage;
   }
 
   private getFromUserMessageParam(rawMsg: ChatCompletionApiMessage): SessionMessage {

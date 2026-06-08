@@ -64,7 +64,7 @@ export class OpenRouterApiModeResolver extends ApiModeResolver {
  * `reasoning.encrypted` blocks are intentionally ignored: they are provider-opaque and meaningless
  * outside the original provider context, so there is nothing useful to preserve.
  */
-export class OpenRouterChatDialectResolver implements DialectResolver<
+export class OpenRouterChatDialectResolver extends DialectResolver<
   ChatCompletionApiMessage,
   ChatCompletionChunk.Choice.Delta,
   ChatCompletionCreateParamsStreaming,
@@ -128,16 +128,6 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
         } as unknown as ChatCompletionMessageParam,
       };
     }
-
-    // Plain text thinking — use the simpler `reasoning` string field.
-    const reasoningText = thinkingParts.map((p) => p.content).join('');
-    return {
-      ...rawMsg,
-      content: {
-        ...rawMsg.content,
-        reasoning: reasoningText,
-      } as unknown as ChatCompletionMessageParam,
-    };
   }
 
   manipulateMessage(msg: SessionMessage, rawMsg: ChatCompletionApiMessage): SessionMessage {
@@ -289,7 +279,7 @@ export class OpenRouterChatDialectResolver implements DialectResolver<
  * OpenRouter's responses endpoint is largely OpenAI-compatible. This resolver keeps
  * the shape pass-through and only applies OpenRouter-specific option normalization.
  */
-export class OpenRouterResponseDialectResolver implements DialectResolver<
+export class OpenRouterResponseDialectResolver extends DialectResolver<
   ResponseApiMessage,
   ResponseStreamEvent,
   ResponseCreateParamsStreaming,
@@ -357,7 +347,7 @@ export class OpenRouterResponseDialectResolver implements DialectResolver<
  * OpenRouter's Anthropic endpoint is largely Anthropic-compatible, so we only
  * keep a light pass-through dialect hook for transport unification.
  */
-export class OpenRouterAnthropicDialectResolver implements DialectResolver<
+export class OpenRouterAnthropicDialectResolver extends DialectResolver<
   AnthropicApiMessage,
   RawContentBlockDelta,
   MessageCreateParamsStreaming,

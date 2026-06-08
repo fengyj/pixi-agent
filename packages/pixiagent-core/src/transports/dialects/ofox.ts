@@ -74,7 +74,7 @@ export class OfoxApiModeResolver extends ApiModeResolver {
   }
 }
 
-export class OfoxChatDialectResolver implements DialectResolver<
+export class OfoxChatDialectResolver extends DialectResolver<
   ChatCompletionApiMessage,
   ChatCompletionChunk.Choice.Delta,
   ChatCompletionCreateParamsStreaming,
@@ -117,7 +117,7 @@ export class OfoxChatDialectResolver implements DialectResolver<
   }
 }
 
-export class OfoxResponseDialectResolver implements DialectResolver<
+export class OfoxResponseDialectResolver extends DialectResolver<
   ResponseApiMessage,
   ResponseStreamEvent,
   ResponseCreateParamsStreaming,
@@ -175,7 +175,7 @@ export class OfoxResponseDialectResolver implements DialectResolver<
   }
 }
 
-export class OfoxAnthropicDialectResolver implements DialectResolver<
+export class OfoxAnthropicDialectResolver extends DialectResolver<
   AnthropicApiMessage,
   RawContentBlockDelta,
   MessageCreateParamsStreaming,

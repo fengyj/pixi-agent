@@ -1,5 +1,8 @@
-import type {  RawContentBlockDelta } from '@anthropic-ai/sdk/resources/messages';
-import type { Message, MessageCreateParamsStreaming } from '@anthropic-ai/sdk/resources/messages/messages';
+import type { RawContentBlockDelta } from '@anthropic-ai/sdk/resources/messages';
+import type {
+  Message,
+  MessageCreateParamsStreaming,
+} from '@anthropic-ai/sdk/resources/messages/messages';
 import type {
   ChatCompletion,
   ChatCompletionChunk,
@@ -19,7 +22,6 @@ import {
   SessionMessage,
 } from '../message';
 import { ToolDefinitionSchema } from '../tools/tool';
-
 
 type RawDeltaMessageType =
   | ChatCompletionChunk.Choice.Delta
@@ -235,7 +237,10 @@ export abstract class DialectResolver<TRawMessage, TRawDelta, TParameters, TRawR
    * via the ProviderTransport's convertFromRawMessage function.
    * @param rawMsg
    */
-  abstract manipulateMessage(msg: SessionMessage, rawMsg: TRawMessage): SessionMessage;
+  abstract manipulateMessage(
+    msg: SessionMessage,
+    rawMsg: TRawMessage,
+  ): SessionMessage;
   /**
    * Extract the data from the raw message or the raw delta when receiving the stream.
    * @param data the name of the data field.
@@ -365,9 +370,9 @@ export interface StreamCallbacks {
 }
 
 /**
- * The StreamDataExtractor is used for accumulating the data from the stream and 
+ * The StreamDataExtractor is used for accumulating the data from the stream and
  * emit the chunk data via the callbacks.
- * 
+ *
  * The class cannot handle the logic of when a content part is completed, because
  * a delta data could contain more than one content part data, we don't know the orders of them,
  * so there is no way to determine when a content part is completed. For example,

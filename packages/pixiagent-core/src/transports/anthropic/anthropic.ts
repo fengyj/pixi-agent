@@ -1027,13 +1027,13 @@ const BlockParamContentPartHelper = {
   },
 
   toThinkingPart(
-    block: ThinkingBlockParam | ThinkingBlock | RedactedThinkingBlockParam | RedactedThinkingBlock,
+    block: ThinkingBlockParam | ThinkingBlock ,
   ): ThinkingPart {
     switch (block.type) {
       case 'thinking':
         return { type: 'thinking', content: block.thinking, signature: block.signature };
-      case 'redacted_thinking':
-        return { type: 'thinking', content: block.data };
+      // | RedactedThinkingBlockParam | RedactedThinkingBlock, the content in these blocks is 
+      // unreadable. It's useless to convert them to ThinkingPart.
     }
   },
 
@@ -1211,18 +1211,12 @@ const ContentPartBlockParamHelper = {
         };
     }
   },
-  toThinkingBlockParam(part: ThinkingPart): ThinkingBlockParam | RedactedThinkingBlockParam {
-    if ('signature' in part && part.signature !== undefined) {
+  toThinkingBlockParam(part: ThinkingPart): ThinkingBlockParam {
       return {
         type: 'thinking',
         thinking: part.content,
-        signature: part.signature,
+        signature: part.signature ?? '',
       };
-    }
-    return {
-      type: 'redacted_thinking',
-      data: part.content,
-    };
   },
   toImageBlockParam(part: ImagePart): ImageBlockParam | null {
     switch (part.image.sourceType) {

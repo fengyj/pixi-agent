@@ -41,7 +41,7 @@ export class DeepSeekApiModeResolver extends ApiModeResolver {
  * Dialect resolver for DeepSeek via the OpenAI Chat Completions API (https://api.deepseek.com).
  * Handles the provider-specific `reasoning_content` field for thinking/reasoning.
  */
-export class DeepSeekChatDialectResolver implements DialectResolver<
+export class DeepSeekChatDialectResolver extends DialectResolver<
   ChatCompletionApiMessage,
   ChatCompletionChunk.Choice.Delta,
   ChatCompletionCreateParamsStreaming,
@@ -96,8 +96,8 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
     if (thinkingParts.length === 0) return rawMsg;
     // Write the accumulated thinking content back as reasoning_content
     const updatedInner = {
-      ...rawMsg.content,
       reasoning_content: thinkingParts.map((p) => p.content).join(''),
+      ...rawMsg.content,
     } as ChatCompletionAssistantMessageParam & { reasoning_content?: string };
     return { ...rawMsg, content: updatedInner };
   }
@@ -176,7 +176,7 @@ export class DeepSeekChatDialectResolver implements DialectResolver<
  * Dialect resolver for DeepSeek via the Anthropic Messages API (https://api.deepseek.com/anthropic).
  * Handles thinking blocks in content using the Anthropic thinking block format.
  */
-export class DeepSeekAnthropicDialectResolver implements DialectResolver<
+export class DeepSeekAnthropicDialectResolver extends DialectResolver<
   AnthropicApiMessage,
   RawContentBlockDelta,
   MessageCreateParamsStreaming,
