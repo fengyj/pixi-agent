@@ -641,11 +641,10 @@ const ContentPartResponseHelper = {
   ): Exclude<ResponseOutputItem, ResponseOutputMessage> | ResponseOutputText | ResponseOutputRefusal {
     if (part.providerSpecific === ApiModes.RESPONSE) {
       try {
-        const parsed = JSON.parse(part.data ?? '{}') as Record<string, unknown>;
+        const parsed = JSON.parse(part.data ?? '{}') as object;
         return {
-          ...(parsed as object),
+          ...parsed,
           type: part.name,
-          call_id: (parsed as { id?: string }).id ?? part.name,
         } as Exclude<ResponseOutputItem, ResponseOutputMessage> | ResponseOutputText | ResponseOutputRefusal;
       } catch {
         // Ignore invalid tool payloads and fall back.

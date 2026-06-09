@@ -24,8 +24,6 @@ import type {
   ContentBlockParam,
   Message,
   MessageCreateParamsStreaming,
-  RedactedThinkingBlock,
-  RedactedThinkingBlockParam,
   SearchResultBlockParam,
   ServerToolUseBlock,
   TextBlock,
@@ -48,6 +46,7 @@ import {
   StreamCallbacks,
   DialectResolver,
   ModelRequestOptions,
+  StreamDataExtractor,
 } from '../base';
 import {
   AnthropicApiMessage,
@@ -61,7 +60,6 @@ import {
   ImagePart,
   DocumentPart,
   RefusalPart,
-  RoleType,
   CitationFileLocation,
   CitationOthersLocation,
   CitationWebLocation,
@@ -105,81 +103,36 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
 
   convertFromRawMessage(rawMsg: AnthropicApiMessage): SessionMessage {
     const inner = rawMsg.content;
-    const msg = (() => {
-      let content: string | ContentPart[] | undefined = undefined;
-      let role: RoleType = rawMsg.role;
-      if (typeof inner.content === 'string') {
-        content = inner.content;
-      } else if (Array.isArray(inner.content)) {
-        content = inner.content
-          .map((block) => {
-            if (block.type === 'text') {
-              return this.convertToTextPart(block);
-            } else if (block.type === 'thinking') {
-              return this.convertToThinkingPart(block);
-            } else if (block.type === 'image') {
-              return this.convertToImagePart(block);
-            } else if (block.type === 'document') {
-              return this.convertToDocumentPart(block);
-            } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
-              return this.convertToToolCallPart(
-                block as ToolUseBlockParam | ServerToolUseBlockParam,
-              );
-            } else if (block.type === 'tool_result') {
-              role = 'tool';
-              return this.convertToToolResultPart(block);
-            } else {
-              return null;
-            }
-          })
-          .filter((part) => part !== null);
-      }
-      return {
-        messageId: rawMsg.messageId,
-        type: 'session_message',
-        role,
-        content,
-        modelResponseInfo: rawMsg.modelResponseInfo,
-        metadata: rawMsg.metadata,
-      } as SessionMessage;
-    })();
+    const msg: SessionMessage = {
+      messageId: rawMsg.messageId,
+      type: 'session_message',
+      role: rawMsg.role,
+      content:
+        typeof inner.content === 'string'
+          ? inner.content
+          : inner.content.map((block) => ConvertHelper.toParts(block)).flat(),
+      modelResponseInfo: rawMsg.modelResponseInfo,
+      metadata: rawMsg.metadata,
+    };
     return this.dialectResolver ? this.dialectResolver.manipulateMessage(msg, rawMsg) : msg;
   }
 
   convertToRawMessage(msg: SessionMessage): AnthropicApiMessage {
-    const inner = (() => {
-      return {
-        role: msg.role === 'tool' ? 'user' : msg.role,
-        content:
-          typeof msg.content === 'string'
-            ? msg.content
-            : msg.content
-                .map((part) => {
-                  if (part.type === 'text' || part.type === 'refusal') {
-                    return this.convertToTextBlockParam(part as TextPart | RefusalPart);
-                  } else if (part.type === 'thinking') {
-                    return this.convertToThinkingBlockParam(part as ThinkingPart);
-                  } else if (part.type === 'image') {
-                    return this.convertToImageBlockParam(part as ImagePart);
-                  } else if (part.type === 'document') {
-                    return this.convertToDocumentBlockParam(part as DocumentPart);
-                  } else if (part.type === 'tool_call') {
-                    return this.convertToToolUseBlockParam(part as ToolCallPart);
-                  } else if (part.type === 'tool_result') {
-                    return this.convertToToolResultBlockParam(part as ToolResultPart);
-                  } else {
-                    return null;
-                  }
-                })
-                .filter((part) => part !== null),
-      };
-    })() as MessageParam;
+    const content = {
+      role: msg.role === 'tool' ? 'user' : msg.role,
+      content:
+        typeof msg.content === 'string'
+          ? msg.content
+          : msg.content
+              .map((part) => ConvertHelper.toBlockParam(part))
+              .filter((part) => part !== null),
+    };
 
     const rawMsg: AnthropicApiMessage = {
       messageId: msg.messageId,
       type: 'anthropic_api_message',
       role: msg.role,
-      content: inner,
+      content: content,
       modelResponseInfo: msg.modelResponseInfo,
       metadata: msg.metadata,
     };
@@ -341,10 +294,6 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
     callbacks?: StreamCallbacks,
     requestOptions?: ModelRequestOptions,
   ): Promise<Omit<AnthropicApiMessage, 'messageId'>> {
-    let currentToolName: string | undefined;
-    const toolInputJsonByIndex = new Map<number, string>();
-    let response: Message | undefined;
-
     const stream = await this.client.messages.create(
       // Cast because MessageStreamParams can include parser helper types (e.g. output_config null)
       // that are accepted by messages.stream but not by the stricter create(stream:true) overload.
@@ -352,88 +301,208 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
       this.getStreamRequestOptions(requestOptions),
     );
 
+    const streamDataExtractor = new StreamDataExtractor(
+      {
+        content: Array<ContentBlock>(),
+        id: '',
+        container: null,
+        model: '',
+        role: 'assistant',
+        stop_details: null,
+        stop_sequence: null,
+        type: 'message',
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+        },
+      } as Message,
+      callbacks,
+    );
+
     for await (const event of stream) {
-      if (event.type === 'message_start') {
-        response = structuredClone(event.message);
-      } else if (event.type === 'content_block_start') {
-        if (event.content_block.type === 'tool_use') {
-          currentToolName = event.content_block.name;
-        }
-        if (response && Array.isArray(response.content)) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (response.content as any[])[event.index] = structuredClone(event.content_block);
-        }
-      } else if (event.type === 'content_block_delta') {
-        const delta = event.delta;
-        if (delta.type === 'text_delta') {
-          callbacks?.onTextChunk?.(delta.text);
-
-          if (response && Array.isArray(response.content)) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const block = (response.content as any[])[event.index];
-            if (block?.type === 'text') {
-              block.text = `${block.text ?? ''}${delta.text}`;
-            }
-          }
-        } else if (delta.type === 'thinking_delta') {
-          callbacks?.onThinkingChunk?.(delta.thinking);
-
-          if (response && Array.isArray(response.content)) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const block = (response.content as any[])[event.index];
-            if (block?.type === 'thinking') {
-              block.thinking = `${block.thinking ?? ''}${delta.thinking}`;
-            }
-          }
-        } else if (delta.type === 'input_json_delta') {
-          if (currentToolName) {
-            // onToolUse is removed from StreamCallbacks.
-          }
-          toolInputJsonByIndex.set(
-            event.index,
-            `${toolInputJsonByIndex.get(event.index) ?? ''}${delta.partial_json}`,
+      switch (event.type) {
+        case 'message_start':
+          streamDataExtractor.accumulatedData.container = event.message.container;
+          streamDataExtractor.accumulatedData.model = event.message.model;
+          streamDataExtractor.accumulatedData.role = event.message.role;
+          streamDataExtractor.accumulatedData.id = event.message.id;
+          streamDataExtractor.accumulatedData.stop_details = event.message.stop_details;
+          streamDataExtractor.accumulatedData.stop_sequence = event.message.stop_sequence;
+          streamDataExtractor.accumulatedData.usage = event.message.usage;
+          streamDataExtractor.accumulatedData.content = event.message.content;
+          break;
+        case 'message_delta':
+          if (!event.delta.container)
+            streamDataExtractor.accumulatedData.container = event.delta.container;
+          if (!event.delta.stop_details)
+            streamDataExtractor.accumulatedData.stop_details = event.delta.stop_details;
+          if (!event.delta.stop_sequence)
+            streamDataExtractor.accumulatedData.stop_sequence = event.delta.stop_sequence;
+          if (event.usage.cache_creation_input_tokens)
+            streamDataExtractor.accumulatedData.usage.cache_creation_input_tokens =
+              event.usage.cache_creation_input_tokens;
+          if (event.usage.cache_read_input_tokens)
+            streamDataExtractor.accumulatedData.usage.cache_read_input_tokens =
+              event.usage.cache_read_input_tokens;
+          if (event.usage.input_tokens)
+            streamDataExtractor.accumulatedData.usage.input_tokens = event.usage.input_tokens;
+          if (event.usage.output_tokens)
+            streamDataExtractor.accumulatedData.usage.output_tokens = event.usage.output_tokens;
+          if (event.usage.server_tool_use)
+            streamDataExtractor.accumulatedData.usage.server_tool_use = event.usage.server_tool_use;
+          break;
+        case 'content_block_start':
+          streamDataExtractor.accumulate(
+            {
+              key: `content_${event.index}`,
+              value: event.content_block,
+            },
+            (accumulatedData, newData) => {
+              if (accumulatedData.content.length !== event.index) {
+                throw PixiAgentErrorBuilder.modelResponseError(
+                  `Received content block index ${event.index} does not match expected index ${accumulatedData.content.length}.`,
+                );
+              }
+              accumulatedData.content.push(newData);
+            },
+            (_accumulatedData, _newData) => {},
+            (data) => {
+              switch (data.type) {
+                case 'text':
+                case 'thinking':
+                case 'tool_use':
+                case 'bash_code_execution_tool_result':
+                case 'code_execution_tool_result':
+                case 'container_upload':
+                case 'redacted_thinking':
+                case 'server_tool_use':
+                case 'text_editor_code_execution_tool_result':
+                case 'tool_search_tool_result':
+                case 'web_fetch_tool_result':
+                case 'web_search_tool_result':
+                  return ConvertHelper.toParts(data) as ContentPart;
+                default:
+                  assertNever(data);
+              }
+            },
           );
-        }
-      } else if (event.type === 'content_block_stop') {
-        currentToolName = undefined;
-      } else if (event.type === 'message_delta') {
-        if (response) {
-          response.stop_reason = event.delta.stop_reason;
-          response.stop_sequence = event.delta.stop_sequence;
-          response.stop_details = event.delta.stop_details;
-          response.usage = {
-            ...response.usage,
-            ...event.usage,
-            input_tokens: event.usage.input_tokens ?? response.usage.input_tokens,
-            cache_creation_input_tokens:
-              event.usage.cache_creation_input_tokens ?? response.usage.cache_creation_input_tokens,
-            cache_read_input_tokens:
-              event.usage.cache_read_input_tokens ?? response.usage.cache_read_input_tokens,
-          } as Message['usage'];
-        }
-      } else if (event.type === 'message_stop') {
-        // Nothing to do at stream end for simplified StreamCallbacks.
-      }
-    }
-
-    if (!response) {
-      throw new Error('Anthropic stream ended without a message_start event');
-    }
-
-    if (Array.isArray(response.content)) {
-      for (const [index, partialJson] of toolInputJsonByIndex.entries()) {
-        const block = response.content[index];
-        if (block?.type === 'tool_use' && partialJson.length > 0) {
-          try {
-            block.input = JSON.parse(partialJson);
-          } catch {
-            block.input = partialJson; // fallback to raw string if JSON parsing fails
+          break;
+        case 'content_block_delta':
+          streamDataExtractor.accumulate(
+            {
+              key: `content_${event.index}`,
+              value: event.delta,
+            },
+            (_accumulatedData, _newData) => {},
+            (_existing, newData, accumulatedData) => {
+              if (accumulatedData.content.length <= event.index) {
+                throw PixiAgentErrorBuilder.modelResponseError(
+                  `Received content block delta for index ${event.index} which exceeds current content length ${accumulatedData.content.length}.`,
+                );
+              }
+              const block = accumulatedData.content[event.index];
+              switch (newData.type) {
+                case 'text_delta':
+                  if (block.type !== 'text')
+                    throw PixiAgentErrorBuilder.modelResponseError(
+                      `Received text_delta for content block at index ${event.index} which is not of type 'text'.`,
+                    );
+                  block.text = `${block.text ?? ''}${newData.text}`;
+                  break;
+                case 'citations_delta':
+                  if (block.type !== 'text')
+                    throw PixiAgentErrorBuilder.modelResponseError(
+                      `Received citations_delta for content block at index ${event.index} which is not of type 'text'.`,
+                    );
+                  block.citations ??= [];
+                  block.citations.push(newData.citation);
+                  break;
+                case 'thinking_delta':
+                  if (block.type !== 'thinking')
+                    throw PixiAgentErrorBuilder.modelResponseError(
+                      `Received thinking_delta for content block at index ${event.index} which is not of type 'thinking'.`,
+                    );
+                  block.thinking = `${block.thinking ?? ''}${newData.thinking}`;
+                  break;
+                case 'signature_delta':
+                  if (block.type !== 'thinking')
+                    throw PixiAgentErrorBuilder.modelResponseError(
+                      `Received signature_delta for content block at index ${event.index} which is not of type 'thinking'.`,
+                    );
+                  block.signature = `${block.signature ?? ''}${newData.signature}`;
+                  break;
+                case 'input_json_delta':
+                  if (block.type !== 'tool_use')
+                    throw PixiAgentErrorBuilder.modelResponseError(
+                      `Received input_json_delta for content block at index ${event.index} which is not of type 'tool_use'.`,
+                    );
+                  block.input = `${block.input ?? ''}${newData.partial_json}`;
+                  break;
+                default:
+                  assertNever(newData);
+              }
+            },
+            (delta) => {
+              switch (delta.type) {
+                case 'text_delta':
+                  return {
+                    type: 'text',
+                    text: delta.text,
+                  };
+                case 'citations_delta':
+                  return ConvertHelper.toParts({
+                    type: 'text',
+                    text: '',
+                    citations: [delta.citation],
+                  }) as TextPart;
+                case 'thinking_delta':
+                  return {
+                    type: 'thinking',
+                    content: delta.thinking,
+                  };
+                case 'input_json_delta': {
+                  const block = streamDataExtractor.accumulatedData.content[
+                    event.index
+                  ] as ToolUseBlock;
+                  return ConvertHelper.toParts({
+                    ...block,
+                    input: delta.partial_json,
+                  }) as ToolCallPart | ServerToolUsePart;
+                }
+                case 'signature_delta':
+                  return null;
+                default:
+                  assertNever(delta);
+              }
+            },
+          );
+          break;
+        case 'content_block_stop': {
+          if (event.index >= streamDataExtractor.accumulatedData.content.length) {
+            throw PixiAgentErrorBuilder.modelResponseError(
+              `Received content block stop for index ${event.index} which exceeds current content length ${streamDataExtractor.accumulatedData.content.length}.`,
+            );
           }
+          const block = streamDataExtractor.accumulatedData.content[event.index];
+          if (block.type === 'tool_use' && typeof block.input === 'string') {
+            try {
+              block.input = JSON.parse(block.input as string);
+            } catch (error) {
+              throw PixiAgentErrorBuilder.modelResponseError(
+                `Failed to parse input JSON for content block at index ${event.index}: ${(error as Error).message}`,
+              );
+            }
+          }
+          break;
         }
+        case 'message_stop':
+          break;
+        default:
+          assertNever(event);
       }
     }
 
-    return this.toModelResponse(response);
+    return this.toModelResponse(streamDataExtractor.accumulatedData);
   }
 
   async generate(
@@ -882,7 +951,6 @@ const BlockParamContentPartHelper = {
       case 'text':
         return BlockParamContentPartHelper.toTextPart(block);
       case 'thinking':
-      case 'redacted_thinking':
         return BlockParamContentPartHelper.toThinkingPart(block);
       case 'image':
         return BlockParamContentPartHelper.toImagePart(block);
@@ -906,6 +974,8 @@ const BlockParamContentPartHelper = {
         return BlockParamContentPartHelper.toToolReferenceTextPart(block);
       case 'search_result': // server side result SearchResultBlockParam | SearchResultBlock
         return BlockParamContentPartHelper.toSearchResultTextPart(block);
+      case 'redacted_thinking':
+        return [];
       default:
         assertNever(block);
     }
@@ -1026,13 +1096,11 @@ const BlockParamContentPartHelper = {
     }
   },
 
-  toThinkingPart(
-    block: ThinkingBlockParam | ThinkingBlock ,
-  ): ThinkingPart {
+  toThinkingPart(block: ThinkingBlockParam | ThinkingBlock): ThinkingPart {
     switch (block.type) {
       case 'thinking':
         return { type: 'thinking', content: block.thinking, signature: block.signature };
-      // | RedactedThinkingBlockParam | RedactedThinkingBlock, the content in these blocks is 
+      // | RedactedThinkingBlockParam | RedactedThinkingBlock, the content in these blocks is
       // unreadable. It's useless to convert them to ThinkingPart.
     }
   },
@@ -1050,25 +1118,34 @@ const BlockParamContentPartHelper = {
             arguments: JSON.stringify(block.input),
           };
         } else {
-          const { id, name, ...rest } = block;
+          const { name, ...rest } = block;
           return {
             type: 'server_tool_use',
-            id: id,
             name: name,
-            arguments: JSON.stringify(rest),
+            data: JSON.stringify(rest),
             providerSpecific: ApiModes.ANTHROPIC,
           };
         }
       }
       case 'server_tool_use': {
-        const { id, name, ...rest } = block;
-        return {
-          type: block.caller && block.caller.type === 'direct' ? 'tool_call' : 'server_tool_use',
-          id: id,
-          name: name,
-          arguments: JSON.stringify(rest),
-          providerSpecific: ApiModes.ANTHROPIC,
-        };
+        if (block.caller && block.caller.type === 'direct') {
+          const { id, name, ...rest } = block;
+          return {
+            type: 'tool_call',
+            id: id,
+            name: name,
+            arguments: JSON.stringify(rest),
+            providerSpecific: ApiModes.ANTHROPIC,
+          };
+        } else {
+          const { name, ...rest } = block;
+          return {
+            type: 'server_tool_use',
+            name: name,
+            data: JSON.stringify(rest),
+            providerSpecific: ApiModes.ANTHROPIC,
+          };
+        }
       }
       default:
         assertNever(block);
@@ -1196,7 +1273,7 @@ const ContentPartBlockParamHelper = {
           : undefined,
     };
   },
-  toCitationParam(citation: Citation): TextCitationParam | TextCitation | null {
+  toCitationParam(citation: Citation): TextCitationParam | null {
     switch (citation.type) {
       case 'file_location':
       case 'others_location':
@@ -1212,11 +1289,11 @@ const ContentPartBlockParamHelper = {
     }
   },
   toThinkingBlockParam(part: ThinkingPart): ThinkingBlockParam {
-      return {
-        type: 'thinking',
-        thinking: part.content,
-        signature: part.signature ?? '',
-      };
+    return {
+      type: 'thinking',
+      thinking: part.content,
+      signature: part.signature ?? '',
+    };
   },
   toImageBlockParam(part: ImagePart): ImageBlockParam | null {
     switch (part.image.sourceType) {
@@ -1384,22 +1461,22 @@ const ContentPartBlockParamHelper = {
       is_error: part.isError ?? undefined,
     };
   },
-  toServerToolUseBlockParam(part: ServerToolUsePart): ServerToolUseBlockParam | TextBlockParam {
+  toServerToolUseBlockParam(
+    part: ServerToolUsePart,
+  ): ToolUseBlockParam | ServerToolUseBlockParam | TextBlockParam {
     if (part.providerSpecific === ApiModes.ANTHROPIC) {
-      return {
-        ...JSON.parse(part.arguments ?? '{}'),
-        id: part.id ?? '',
-        name: part.name,
-      };
+      try {
+        return {
+          ...JSON.parse(part.data ?? '{}'),
+          name: part.name,
+        };
+      } catch {
+        // empty
+      }
     }
     return {
       type: 'text',
-      text: JSON.stringify({
-        tool_name: part.name,
-        arguments: part.arguments,
-        result: part.result,
-        type: 'server_tool_use',
-      }),
+      text: `Tool use: ${part.name} with data ${part.data}`,
     };
   },
   toAudioTextBlockParam(part: AudioPart): TextBlockParam {
