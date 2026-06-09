@@ -145,7 +145,7 @@ class ChatCompletionRawMessageConverter {
       const { id, type, ...rest } = toolCall;
       parts.push({
         type: 'tool_call',
-        id,
+        id: id,
         name: type,
         arguments: JSON.stringify(rest),
         providerSpecific: ApiModes.COMPLETIONS,

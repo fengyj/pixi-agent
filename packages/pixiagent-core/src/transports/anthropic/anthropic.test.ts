@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AnthropicTransport } from './anthropic';
-import type { AnthropicApiMessage, SessionMessage } from '../../message';
+import { ApiModes, type AnthropicApiMessage, type SessionMessage } from '../../message';
 
 describe('AnthropicTransport conversion', () => {
   const transport = new AnthropicTransport(undefined, 'test-api-key');
@@ -35,7 +35,7 @@ describe('AnthropicTransport conversion', () => {
 
     expect(session.messageId).toBe('anthro-1');
     expect(session.type).toBe('session_message');
-    expect(session.role).toBe('tool');
+    expect(session.role).toBe('assistant');
     expect(Array.isArray(session.content)).toBe(true);
     expect(session.content).toMatchObject([
       { type: 'text', text: 'assistant answer' },
@@ -135,9 +135,10 @@ describe('AnthropicTransport conversion', () => {
 
     expect(session.content).toMatchObject([
       {
-        type: 'tool_call',
-        id: 'server-1',
+        type: 'server_tool_use',
         name: 'custom-tool',
+        providerSpecific: ApiModes.ANTHROPIC,
+        data: JSON.stringify({ id: 'server-1', input: { test: true } }),
       },
     ]);
   });
