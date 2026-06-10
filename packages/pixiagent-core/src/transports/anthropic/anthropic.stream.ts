@@ -35,6 +35,7 @@ export class AnthropicStreamProcessor {
         model: '',
         role: 'assistant',
         stop_details: null,
+        stop_reason: null,
         stop_sequence: null,
         type: 'message',
         usage: {
@@ -63,12 +64,16 @@ export class AnthropicStreamProcessor {
         streamDataExtractor.accumulatedData.role = event.message.role;
         streamDataExtractor.accumulatedData.id = event.message.id;
         streamDataExtractor.accumulatedData.stop_details = event.message.stop_details;
+        streamDataExtractor.accumulatedData.stop_reason = event.message.stop_reason;
         streamDataExtractor.accumulatedData.stop_sequence = event.message.stop_sequence;
         streamDataExtractor.accumulatedData.usage = event.message.usage;
-        streamDataExtractor.accumulatedData.content = event.message.content;
+        streamDataExtractor.accumulatedData.content.push(...event.message.content);
         return;
 
       case 'message_delta':
+        if (event.delta.stop_reason) {
+          streamDataExtractor.accumulatedData.stop_reason = event.delta.stop_reason;
+        }
         if (event.delta.container) {
           streamDataExtractor.accumulatedData.container = event.delta.container;
         }

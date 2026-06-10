@@ -13,7 +13,6 @@ import { SessionThread } from './session';
 import * as Transport from './transports';
 import { ProviderTransport, ModelOptions } from './transports';
 import {
-  ContentPart,
   InternalMessage,
   ModelStopReasons,
   RawMessageType,
@@ -31,22 +30,23 @@ import {
 
 import * as Observation from './observation';
 import { AgentEventEmitter, AgentMessageChunkEventCallbacks } from './event';
+import { ContentParts } from './utils';
 const trace = Observation.getTracer('pixiagent.agent');
 const { withSpan, retry } = Observation.Helpers;
 
 export class PixiAgent {
   private readonly logger: ReturnType<ReturnType<typeof Observation.getLogger>['child']>;
   private _transport: ProviderTransport<RawMessageType>;
-  private convertedMessagesCache = new Map<string, RawMessageType | RawMessageType[]>();
-  private transportCache = new Map<string, ProviderTransport<RawMessageType>>();
+  private readonly convertedMessagesCache = new Map<string, RawMessageType | RawMessageType[]>();
+  private readonly transportCache = new Map<string, ProviderTransport<RawMessageType>>();
+  private readonly eventEmitter?: AgentEventEmitter;
   private abortController = new AbortController();
   private isRunning = false;
-  private eventEmitter?: AgentEventEmitter;
   // todo: add event listener as parameter to expose the events.
   constructor(
     public readonly sessionThread: SessionThread,
-    public readonly toolRegistry: ToolRegistry,
-    public readonly options?: PixiAgentOptions,
+    private readonly toolRegistry: ToolRegistry,
+    private readonly options?: PixiAgentOptions,
   ) {
     sessionThread.threadInfo.modelOptions = PixiAgent.resolveApiModeAndBaseUrl(
       sessionThread.threadInfo.modelOptions,
@@ -863,7 +863,7 @@ export class PixiAgent {
       prevInternalMessageId: internalMessage.previousMessageId,
       role: sessionMessage.role,
       name: sessionMessage.name,
-      content: ContentPart.digest(sessionMessage.content),
+      content: ContentParts.digest(sessionMessage.content),
       metadata: modelOptions.metadata,
     };
   }
