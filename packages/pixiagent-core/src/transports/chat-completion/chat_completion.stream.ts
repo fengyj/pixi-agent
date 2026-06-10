@@ -168,10 +168,11 @@ export class ChatCompletionStreamProcessor {
           ).message.tool_calls ??= [];
           const tool_calls = accumulated.choices[0].message
             .tool_calls as Array<ChatCompletionMessageFunctionToolCall>;
-          if (tool_calls.length <= tc.index) {
-            PixiAgentErrorBuilder.modelResponseError(
+          if (tool_calls.length !== tc.index) {
+            throw PixiAgentErrorBuilder.modelResponseError(
               `Received tool call index ${tc.index} out of order or with gaps. Current tool_calls length: ${tool_calls.length}`,
               this.clientBaseUrl,
+              'invalid_stream_event',
             );
           }
           (

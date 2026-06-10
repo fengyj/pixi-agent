@@ -69,13 +69,13 @@ export class AnthropicStreamProcessor {
         return;
 
       case 'message_delta':
-        if (!event.delta.container) {
+        if (event.delta.container) {
           streamDataExtractor.accumulatedData.container = event.delta.container;
         }
-        if (!event.delta.stop_details) {
+        if (event.delta.stop_details) {
           streamDataExtractor.accumulatedData.stop_details = event.delta.stop_details;
         }
-        if (!event.delta.stop_sequence) {
+        if (event.delta.stop_sequence) {
           streamDataExtractor.accumulatedData.stop_sequence = event.delta.stop_sequence;
         }
         if (event.usage.cache_creation_input_tokens) {

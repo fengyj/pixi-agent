@@ -358,10 +358,19 @@ export class ResponseStreamProcessor {
       () => undefined,
       (existing, newData) => {
         existing.arguments += newData.arguments;
-        newData.call_id = existing.call_id;
-        newData.name = existing.name;
       },
-      (delta) => (delta.arguments === '' ? null : ResponseConversionHelper.toContentPart(delta)),
+      (delta) => {
+        if (delta.arguments === '') {
+          return null;
+        }
+        const toolcall = streamDataExtractor.accumulatedData.content[event.output_index];
+        if (!toolcall || toolcall.type !== 'function_call') {
+          throw this.createInvalidEventError('Received function call arguments delta for non-existing or non-function call item', event);
+        }
+        delta.call_id = toolcall.call_id;
+        delta.name = toolcall.name;
+        return ResponseConversionHelper.toContentPart(delta);
+      },
     );
   }
 

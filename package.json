@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "A TypeScript monorepo for the Pixi agent system.",
-  "packageManager": "pnpm@11.3.0",
+  "packageManager": "pnpm@11.5.2",
   "scripts": {
     "bootstrap": "pnpm install",
     "build": "pnpm -r run build",
