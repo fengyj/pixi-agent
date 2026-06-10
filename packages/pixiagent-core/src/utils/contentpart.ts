@@ -1,4 +1,40 @@
-import { TextPart, ContentPart, ToolCallPart, ApiModes } from "../message";
+import {
+  TextPart,
+  ContentPart,
+  ImagePart,
+  DocumentPart,
+  AudioPart,
+  VideoPart,
+  ServerToolUsePart,
+} from '../message';
+
+/**
+ * Produce a plain text string as a fallback for a `ServerToolUsePart` whose
+ * native target format is not supported.
+ *
+ * Kept here as a single source of truth so every converter emits the same
+ * human-readable placeholder.
+ */
+function serverToolUseFallbackText(part: ServerToolUsePart): string {
+  return `Tool use: ${part.name} with data ${part.data}`;
+}
+
+/**
+ * Produce a plain text string as a fallback for a media content part
+ * (image, document, audio, video) whose native target format is not supported
+ * by the destination SDK.
+ *
+ * The pattern is `JSON.stringify(rest)` where `{ type, ...rest }` are the
+ * part's own fields, so a downstream user can still recover the original data
+ * if needed.
+ */
+function mediaFallbackText(
+  part: ImagePart | DocumentPart | AudioPart | VideoPart,
+): string {
+  const rest = { ...part } as Record<string, unknown>;
+  delete rest.type;
+  return JSON.stringify(rest);
+}
 
 
 /**
@@ -72,4 +108,6 @@ export const ContentParts = {
   toParts: toContentParts,
   concat: concatContentParts,
   digest: getContentDigest,
+  serverToolUseFallbackText,
+  mediaFallbackText,
 };

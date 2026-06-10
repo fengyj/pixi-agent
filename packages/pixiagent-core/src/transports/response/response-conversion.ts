@@ -43,7 +43,7 @@ import {
   ToolCallPart,
   ToolResultPart,
 } from '../../message';
-import { assertNever } from '../../utils';
+import { assertNever, ContentParts } from '../../utils';
 
 const ResponseContentPartHelper = {
   toContentPartsFromInputItem(item: ResponseInputItem): ContentPart[] {
@@ -470,8 +470,10 @@ const ContentPartResponseHelper = {
           break;
         case 'audio':
         case 'video':
-        case 'refusal':
-        case 'thinking':
+          items.push(ContentPartResponseHelper.toInputText({ type: 'text' as const, text: ContentParts.mediaFallbackText(part) }));
+          break;
+        case 'refusal': // user and tool messages don't have this part type data.
+        case 'thinking': // user and tool messages don't have this part type data.
           break;
         default:
           assertNever(part);
@@ -528,6 +530,8 @@ const ContentPartResponseHelper = {
         case 'image':
           if (part.image.sourceType === 'base64') {
             items.push(ContentPartResponseHelper.toImageGenerationCall(part as ImagePart & { image: { sourceType: 'base64' } }));
+          } else {
+            items.push(ContentPartResponseHelper.toOutputText({ type: 'text' as const, text: ContentParts.mediaFallbackText(part) }));
           }
           break;
         case 'tool_call':
@@ -542,6 +546,7 @@ const ContentPartResponseHelper = {
         case 'audio':
         case 'document':
         case 'video':
+          items.push(ContentPartResponseHelper.toOutputText({ type: 'text' as const, text: ContentParts.mediaFallbackText(part) }));
           break;
         default:
           assertNever(part);
@@ -653,7 +658,7 @@ const ContentPartResponseHelper = {
 
     return {
       type: 'output_text',
-      text: `Tool use: ${part.name} with data ${part.data}`,
+      text: ContentParts.serverToolUseFallbackText(part),
       annotations: [],
     } as ResponseOutputText;
   },
@@ -676,7 +681,7 @@ const ContentPartResponseHelper = {
 
     return {
       type: 'input_text',
-      text: `Tool use: ${part.name} with data ${part.data}`,
+      text: ContentParts.serverToolUseFallbackText(part),
     } as ResponseInputText;
   },
 

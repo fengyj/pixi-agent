@@ -49,7 +49,7 @@ import {
   AudioPart,
   VideoPart,
 } from '../../message';
-import { assertNever } from '../../utils';
+import { assertNever, ContentParts } from '../../utils';
 
 class AnthropicRawMessageConverter {
   convertFromRawMessage(rawMsg: AnthropicApiMessage): SessionMessage {
@@ -76,9 +76,7 @@ class AnthropicSessionMessageConverter {
       content:
         typeof msg.content === 'string'
           ? msg.content
-          : msg.content
-              .map((part) => partConverter.toBlockParam(part))
-              .filter((part): part is ContentBlockParam => part !== null),
+          : msg.content.map((part) => partConverter.toBlockParam(part)),
     };
 
     return {
@@ -372,7 +370,7 @@ class AnthropicBlockPartConverter {
 }
 
 class AnthropicPartConverter {
-  toBlockParam(part: ContentPart): ContentBlockParam | null {
+  toBlockParam(part: ContentPart): ContentBlockParam {
     switch (part.type) {
       case 'text':
       case 'refusal':
@@ -437,7 +435,7 @@ class AnthropicPartConverter {
     };
   }
 
-  private toImageBlockParam(part: ImagePart): ImageBlockParam | null {
+  private toImageBlockParam(part: ImagePart): ImageBlockParam | TextBlockParam {
     switch (part.image.sourceType) {
       case 'base64':
         switch (part.image.mimeType) {
@@ -454,18 +452,18 @@ class AnthropicPartConverter {
               },
             };
           default:
-            return null;
+            return this.mediaFallbackText(part);
         }
       case 'url':
         return { type: 'image', source: { type: 'url', url: part.image.url } };
       case 'file_id':
-        return null;
+        return this.mediaFallbackText(part);
       default:
         return assertNever(part.image as never);
     }
   }
 
-  private toDocumentBlockParam(part: DocumentPart): DocumentBlockParam | null {
+  private toDocumentBlockParam(part: DocumentPart): DocumentBlockParam | TextBlockParam {
     switch (part.document.sourceType) {
       case 'base64':
         switch (part.document.mimeType) {
@@ -480,15 +478,23 @@ class AnthropicPartConverter {
               source: { type: 'base64', media_type: 'application/pdf', data: part.document.data! },
             };
           default:
-            return null;
+            return this.mediaFallbackText(part);
         }
       case 'url':
         return { type: 'document', source: { type: 'url', url: part.document.url! } };
       case 'file_id':
-        return null;
+        return this.mediaFallbackText(part);
       default:
         return assertNever(part.document as never);
     }
+  }
+
+  /** Produce a text block as a fallback when the media type isn't natively supported. */
+  private mediaFallbackText(part: ImagePart | DocumentPart): TextBlockParam {
+    return {
+      type: 'text',
+      text: ContentParts.mediaFallbackText(part),
+    };
   }
 
   private toToolUseBlockParam(part: ToolCallPart): ToolUseBlockParam | ServerToolUseBlockParam {
@@ -518,7 +524,7 @@ class AnthropicPartConverter {
           case 'web_search': {
             const resultObject = typeof parsedResult === 'object' && parsedResult !== null ? parsedResult : {};
             return {
-              ...(resultObject as Record<string, unknown>),
+              ...resultObject,
               type: `${part.name}_tool_result`,
               tool_use_id: part.id,
             } as unknown as ToolResultBlockParam;
@@ -564,21 +570,21 @@ class AnthropicPartConverter {
 
     return {
       type: 'text',
-      text: `Tool use: ${part.name} with data ${part.data}`,
+      text: ContentParts.serverToolUseFallbackText(part),
     };
   }
 
   private toAudioTextBlockParam(part: AudioPart): TextBlockParam {
     return {
       type: 'text',
-      text: JSON.stringify({ audio: part.audio, type: part.type }),
+      text: ContentParts.mediaFallbackText(part),
     };
   }
 
   private toVideoTextBlockParam(part: VideoPart): TextBlockParam {
     return {
       type: 'text',
-      text: JSON.stringify({ video: part.video, type: part.type }),
+      text: ContentParts.mediaFallbackText(part),
     };
   }
 }
@@ -607,7 +613,7 @@ export const AnthropicMessageConverter = {
     return blockPartConverter.toParts(block);
   },
 
-  toBlockParam(part: ContentPart): ContentBlockParam | null {
+  toBlockParam(part: ContentPart): ContentBlockParam {
     return partConverter.toBlockParam(part);
   },
 };

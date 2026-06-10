@@ -24,9 +24,11 @@ import {
   ToolResultPart,
   ContentPart,
   CitationWebLocation,
+  ServerToolUsePart,
+  VideoPart,
 } from '../../message';
 import { PixiAgentErrorBuilder } from '../../errors';
-import { assertNever } from '../../utils';
+import { assertNever, ContentParts } from '../../utils';
 
 export class ChatCompletionMessageConverter {
   private readonly rawConverter = new ChatCompletionRawMessageConverter();
@@ -42,7 +44,6 @@ export class ChatCompletionMessageConverter {
 }
 
 class ChatCompletionRawMessageConverter {
-
   convertFromRawMessage(rawMsg: ChatCompletionApiMessage): SessionMessage {
     switch (rawMsg.content.role) {
       case 'assistant':
@@ -81,7 +82,9 @@ class ChatCompletionRawMessageConverter {
     const parts: ContentPart[] = [];
 
     this.appendFunctionCallParts(parts, msg.function_call, msg.tool_calls);
-
+    // the text in the content of the model's response is string type,
+    // and the refusal is in the refusal field when it's available.
+    // the array type of the content is used for combining the multiple assistant messages.
     if (Array.isArray(msg.content)) {
       msg.content.forEach((contentPart) => {
         if (contentPart.type === 'text') {
@@ -587,7 +590,7 @@ class ChatCompletionSessionMessageConverter {
     return { type: 'refusal', refusal: part.reason };
   }
 
-  private convertToChatCompletionImagePart(part: ImagePart): ChatCompletionContentPartImage | null {
+  private convertToChatCompletionImagePart(part: ImagePart): ChatCompletionContentPartImage | ChatCompletionContentPartText {
     switch (part.image.sourceType) {
       case 'url':
         return { type: 'image_url', image_url: { url: part.image.url } };
@@ -597,15 +600,15 @@ class ChatCompletionSessionMessageConverter {
           image_url: { url: `data:${part.image.mimeType};base64,${part.image.data}` },
         };
       default:
-        return null;
+        return { type: 'text', text: ContentParts.mediaFallbackText(part) };
     }
   }
 
   private convertToChatCompletionAudioPart(
     part: AudioPart,
-  ): ChatCompletionContentPartInputAudio | null {
+  ): ChatCompletionContentPartInputAudio | ChatCompletionContentPartText {
     if (part.audio.sourceType !== 'base64') {
-      return null;
+      return { type: 'text', text: ContentParts.mediaFallbackText(part) };
     }
 
     const format = part.audio.mimeType.replace('audio/', '');
@@ -618,7 +621,11 @@ class ChatCompletionSessionMessageConverter {
     };
   }
 
-  private convertToChatCompletionFilePart(part: DocumentPart): ChatCompletionContentPart.File {
+  private convertToChatCompletionFilePart(part: DocumentPart): ChatCompletionContentPart.File | ChatCompletionContentPartText {
+    if (part.document.sourceType === 'url') {
+      return { type: 'text', text: ContentParts.mediaFallbackText(part) };
+    }
+
     return {
       type: 'file',
       file: {
@@ -629,16 +636,38 @@ class ChatCompletionSessionMessageConverter {
     };
   }
 
+  private convertToChatCompletionVideoPart(part: VideoPart): ChatCompletionContentPartText {
+    return { type: 'text', text: ContentParts.mediaFallbackText(part) };
+  }
+
   private convertToChatCompletionAssistantContentPart(
     part: ContentPart,
   ): ChatCompletionContentPartText | ChatCompletionContentPartRefusal | null {
-    if (part.type === 'text') {
-      return this.convertToChatCompletionTextPart(part as TextPart);
+    switch (part.type) {
+      case 'text':
+        return this.convertToChatCompletionTextPart(part as TextPart);
+      case 'refusal':
+        return this.convertToChatCompletionRefusalPart(part as RefusalPart);
+      case 'server_tool_use':
+        return {
+          type: 'text',
+          text: ContentParts.serverToolUseFallbackText(part as ServerToolUsePart),
+        };
+      case 'tool_call': // tool call parts are not handled by this function.
+      case 'tool_result': // this should not be existed in the assistant message.
+      case 'thinking': // this is not a content part in the ChatCompletion schema
+        return null;
+      case 'audio':
+      case 'image':
+      case 'document':
+      case 'video':
+        return {
+          type: 'text' as const,
+          text: ContentParts.mediaFallbackText(part),
+        };
+      default:
+        return assertNever(part);
     }
-    if (part.type === 'refusal') {
-      return this.convertToChatCompletionRefusalPart(part as RefusalPart);
-    }
-    return null;
   }
 
   private convertToChatCompletionUserContentPart(
@@ -653,8 +682,16 @@ class ChatCompletionSessionMessageConverter {
         return this.convertToChatCompletionAudioPart(part as AudioPart);
       case 'document':
         return this.convertToChatCompletionFilePart(part as DocumentPart);
-      default:
+      case 'video':
+        return this.convertToChatCompletionVideoPart(part as VideoPart);
+      case 'refusal':
+      case 'tool_call':
+      case 'tool_result':
+      case 'server_tool_use':
+      case 'thinking':
         return null;
+      default:
+        return assertNever(part);
     }
   }
 }

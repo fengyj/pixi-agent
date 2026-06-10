@@ -62,9 +62,7 @@ export class AnthropicTransport extends ProviderTransport<AnthropicApiMessage> {
       content:
         typeof msg.content === 'string'
           ? msg.content
-          : msg.content
-              .map((part) => AnthropicMessageConverter.toBlockParam(part))
-              .filter((part) => part !== null),
+          : msg.content.map((part) => AnthropicMessageConverter.toBlockParam(part)),
     };
 
     const rawMsg: AnthropicApiMessage = {
