@@ -110,24 +110,18 @@ export class OpenRouterChatDialectResolver extends DialectResolver<
     const thinkingParts = msg.content.filter((p): p is ThinkingPart => p.type === 'thinking');
     if (thinkingParts.length === 0) return rawMsg;
 
-    // If any part carries a signature, use reasoning_details so that Anthropic's signed
-    // thinking blocks are preserved verbatim.
-    const hasStructuredParts = thinkingParts.some((p) => p.signature != null);
-
-    if (hasStructuredParts) {
-      const reasoningDetails = thinkingParts.map((p) => ({
-        type: 'reasoning.text',
-        text: p.content,
-        signature: p.signature ?? null,
-      }));
-      return {
-        ...rawMsg,
-        content: {
-          ...rawMsg.content,
-          reasoning_details: reasoningDetails,
-        } as unknown as ChatCompletionMessageParam,
-      };
-    }
+    const reasoningDetails = thinkingParts.map((p) => ({
+      type: 'reasoning.text',
+      text: p.content,
+      signature: p.signature ?? null,
+    }));
+    return {
+      ...rawMsg,
+      content: {
+        ...rawMsg.content,
+        reasoning_details: reasoningDetails,
+      } as unknown as ChatCompletionMessageParam,
+    };
   }
 
   manipulateMessage(msg: SessionMessage, rawMsg: ChatCompletionApiMessage): SessionMessage {
@@ -164,7 +158,7 @@ export class OpenRouterChatDialectResolver extends DialectResolver<
           });
         }
       }
-    } 
+    }
 
     if (thinkingParts.length === 0) return msg;
 
@@ -194,7 +188,8 @@ export class OpenRouterChatDialectResolver extends DialectResolver<
           (d) =>
             typeof d === 'object' &&
             typeof d.type === 'string' &&
-            'index' in d && typeof d.index === 'number' &&
+            'index' in d &&
+            typeof d.index === 'number' &&
             (typeof d.text === 'string' || typeof d.summary === 'string'),
         )
       ) {
@@ -217,13 +212,20 @@ export class OpenRouterChatDialectResolver extends DialectResolver<
               const message = getMessageObj(acc) as { reasoning_details?: unknown[] } | undefined;
               if (!message) return;
               if (!('reasoning_details' in message) || !Array.isArray(message.reasoning_details)) {
-                (
-                  message as object & { reasoning_details: unknown[] }
-                ).reasoning_details = [];
+                (message as object & { reasoning_details: unknown[] }).reasoning_details = [];
               }
               const details = message.reasoning_details as unknown[];
-              if(details.length >= detail.index) {
-                throw PixiAgentErrorBuilder.modelResponseError(`Received reasoning_details with non-sequential index ${detail.index}`);
+              const hasMatchingIndex = details.some(
+                (existing) =>
+                  typeof existing === 'object' &&
+                  existing !== null &&
+                  'index' in existing &&
+                  existing.index === detail.index,
+              );
+              if (!hasMatchingIndex && details.length !== detail.index) {
+                throw PixiAgentErrorBuilder.modelResponseError(
+                  `Received reasoning_details with non-sequential index ${detail.index}`,
+                );
               }
               details.push(newData);
             },
@@ -248,12 +250,12 @@ export class OpenRouterChatDialectResolver extends DialectResolver<
               if (!content || content.length === 0) {
                 return null;
               }
-              return { 
-                type: 'thinking' as const, 
-                content: content, 
+              return {
+                type: 'thinking' as const,
+                content: content,
                 signature: data.signature,
                 isSummary: data.type === 'reasoning.summary',
-               };
+              };
             },
           );
         }
@@ -357,7 +359,10 @@ export class OpenRouterAnthropicDialectResolver extends DialectResolver<
     return normalizeUrl(baseUrl) === OPENROUTER_ANTHROPIC_MESSAGES_ENDPOINT;
   }
 
-  manipulateOptions(_options: ModelOptions, parameters: MessageCreateParamsStreaming): MessageCreateParamsStreaming {
+  manipulateOptions(
+    _options: ModelOptions,
+    parameters: MessageCreateParamsStreaming,
+  ): MessageCreateParamsStreaming {
     return parameters;
   }
 

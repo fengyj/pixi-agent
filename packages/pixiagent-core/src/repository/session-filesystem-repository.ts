@@ -203,7 +203,13 @@ export class SessionFileSystemRepository implements SessionRepository {
     threadInfo: Omit<
       SessionThreadInfo,
       'rootMessageId' | 'headMessageId' | 'forkedFromMessageId' | 'createdAt'
-    > & { threadId: string; headMessageId: string },
+    > & {
+      threadId: string;
+      rootMessageId?: never;
+      headMessageId?: never;
+      forkedFromMessageId?: never;
+      createdAt?: never;
+    },
   ): Promise<void> {
     const session = await this.loadSession(sessionId, false);
     if (!session) {

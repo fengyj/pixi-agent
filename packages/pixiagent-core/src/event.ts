@@ -117,6 +117,8 @@ interface AgentExecutionStateChangedEventData {
      * The agent finished abnormally.
      */
     | 'incomplete';
+  sessionId: string;
+  threadId: string;
   /**
    * Avaiable when `user_message_received`, `before_model_request`, `after_model_response`,
    * and `after_tool_call_response` events are emitted.
@@ -168,23 +170,41 @@ export type AgentEvents = {
 export class AgentEventEmitter {
   private emitter = new Emittery<AgentEvents>();
   public executionState = {
-    userMessageReceived: (msg: Omit<SessionMessage, 'messageId'>): Promise<void> => {
-      return this.emit('execution_state_changed', {
+    userMessageReceived: async (
+      sessionId: string,
+      threadId: string,
+      msg: Omit<SessionMessage, 'messageId'>,
+    ): Promise<void> => {
+      await this.emit('execution_state_changed', {
         eventType: 'execution_state_changed',
+        sessionId: sessionId,
+        threadId: threadId,
         newState: 'user_message_received',
         message: msg,
       });
     },
-    beforeModelRequest: (msg: SessionMessage): Promise<void> => {
-      return this.emit('execution_state_changed', {
+    beforeModelRequest: async (
+      sessionId: string,
+      threadId: string,
+      msg: SessionMessage,
+    ): Promise<void> => {
+      await this.emit('execution_state_changed', {
         eventType: 'execution_state_changed',
+        sessionId: sessionId,
+        threadId: threadId,
         newState: 'before_model_request',
         message: msg,
       });
     },
-    afterModelResponse: (msg: SessionMessage): Promise<void> => {
-      return this.emit('execution_state_changed', {
+    afterModelResponse: async (
+      sessionId: string,
+      threadId: string,
+      msg: SessionMessage,
+    ): Promise<void> => {
+      await this.emit('execution_state_changed', {
         eventType: 'execution_state_changed',
+        sessionId: sessionId,
+        threadId: threadId,
         newState: 'after_model_response',
         message: msg,
         hasToolCall:
@@ -197,51 +217,82 @@ export class AgentEventEmitter {
             : undefined,
       });
     },
-    beforeToolCallRequest: (toolCall: ToolCallPart): Promise<void> => {
-      return this.emit('execution_state_changed', {
+    beforeToolCallRequest: async (
+      sessionId: string,
+      threadId: string,
+      toolCall: ToolCallPart,
+    ): Promise<void> => {
+      await this.emit('execution_state_changed', {
         eventType: 'execution_state_changed',
+        sessionId: sessionId,
+        threadId: threadId,
         newState: 'before_tool_call_request',
         toolCall,
       });
     },
-    afterToolCallResponse: (toolCall: ToolCallPart, toolResult: ToolResultPart): Promise<void> => {
-      return this.emit('execution_state_changed', {
+    afterToolCallResponse: async (
+      sessionId: string,
+      threadId: string,
+      toolCall: ToolCallPart,
+      toolResult: ToolResultPart,
+    ): Promise<void> => {
+      await this.emit('execution_state_changed', {
         eventType: 'execution_state_changed',
+        sessionId: sessionId,
+        threadId: threadId,
         newState: 'after_tool_call_response',
         toolCall,
         toolResult,
       });
     },
-    toolCallsFinished: (msg: SessionMessage): Promise<void> => {
-      return this.emit('execution_state_changed', {
+    toolCallsFinished: async (
+      sessionId: string,
+      threadId: string,
+      msg: SessionMessage,
+    ): Promise<void> => {
+      await this.emit('execution_state_changed', {
         eventType: 'execution_state_changed',
+        sessionId: sessionId,
+        threadId: threadId,
         newState: 'tool_calls_finished',
         message: msg,
       });
     },
-    iterationCompleted: (iteration: number): Promise<void> => {
-      return this.emit('execution_state_changed', {
+    iterationCompleted: async (
+      sessionId: string,
+      threadId: string,
+      iteration: number,
+    ): Promise<void> => {
+      await this.emit('execution_state_changed', {
         eventType: 'execution_state_changed',
+        sessionId: sessionId,
+        threadId: threadId,
         newState: 'iteration_completed',
         iteration,
       });
     },
-    executionFinished: (
+    executionFinished: async (
+      sessionId: string,
+      threadId: string,
       agentStopReason: AgentStopReason,
       usage?: UsageStats,
       error?: Error,
     ): Promise<void> => {
-      return this.emit('execution_state_changed', {
+      await this.emit('execution_state_changed', {
         eventType: 'execution_state_changed',
+        sessionId: sessionId,
+        threadId: threadId,
         newState: agentStopReason === 'end_turn' ? 'completed' : 'incomplete',
         agentStopReason: agentStopReason,
         usage,
         error,
       });
     },
-    interrupted: (): Promise<void> => {
-      return this.emit('execution_state_changed', {
+    interrupted: async (sessionId: string, threadId: string): Promise<void> => {
+      await this.emit('execution_state_changed', {
         eventType: 'execution_state_changed',
+        sessionId: sessionId,
+        threadId: threadId,
         newState: 'interrupted',
       });
     },

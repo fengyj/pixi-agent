@@ -288,7 +288,7 @@ describe('ResponseStreamProcessor', () => {
 
     it('throws when function_call_arguments.delta targets non-function_call item', async () => {
       const processor = new ResponseStreamProcessor(undefined, 'https://example.test/v1');
-      const extractor = new StreamDataExtractor({ content: [] as never[], response: undefined as never }, { onChunk: vi.fn(), onFinish: vi.fn() as never });
+      const extractor = new StreamDataExtractor({ content: [] as never[], response: undefined as never }, { onChunk: vi.fn() });
       await processor.handleEvent({ type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg-1', role: 'assistant', status: 'in_progress', content: [] } } as never, extractor);
 
       // The toContentPart callback validates the type and runs when a callback is provided

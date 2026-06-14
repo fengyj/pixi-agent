@@ -2,6 +2,10 @@ export class Mutex {
   private queue: Array<() => void> = [];
   private locked = false;
 
+  get isLocked(): boolean {
+    return this.locked;
+  }
+
   async acquire(): Promise<() => void> {
     return new Promise((resolve) => {
       const tryAcquire = () => {
@@ -18,10 +22,10 @@ export class Mutex {
 
   private release(): void {
     const next = this.queue.shift();
+    this.locked = false;
+
     if (next) {
       next();
-    } else {
-      this.locked = false;
     }
   }
 

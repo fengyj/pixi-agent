@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { ResponseConversionHelper } from './response-conversion';
-import type { ResponseInputItem, ResponseOutputItem } from 'openai/resources/responses/responses';
+import type {
+  ResponseComputerToolCallOutputItem,
+  ResponseCustomToolCall,
+  ResponseFileSearchToolCall,
+  ResponseFunctionWebSearch,
+  ResponseInputItem,
+  ResponseOutputItem,
+  ResponseReasoningItem,
+} from 'openai/resources/responses/responses';
+import { ApiModes } from '../../message';
 
 describe('ResponseConversionHelper', () => {
   it('maps response input message items to content parts', () => {
@@ -62,7 +71,7 @@ describe('ResponseConversionHelper', () => {
   // ── round-trip tests ─────────────────────────────────────────────────────
 
   it('round-trips reasoning items', () => {
-    const item: ResponseOutputItem.Reasoning = {
+    const item: ResponseReasoningItem = {
       type: 'reasoning',
       id: 'reason-1',
       summary: [{ type: 'summary_text', text: 'I should search first' }],
@@ -112,13 +121,12 @@ describe('ResponseConversionHelper', () => {
   });
 
   it('round-trips custom_tool_call with call_id', () => {
-    const item: ResponseOutputItem.CustomToolCall = {
+    const item: ResponseCustomToolCall = {
       type: 'custom_tool_call',
       id: 'ct-1',
       call_id: 'call-1',
-      status: 'completed',
-      custom_field: 'val',
-    } as ResponseOutputItem.CustomToolCall;
+      input: 'val',
+    } as ResponseCustomToolCall;
 
     const parts = ResponseConversionHelper.toContentParts(item);
     expect(parts[0]).toMatchObject({
@@ -139,16 +147,16 @@ describe('ResponseConversionHelper', () => {
     expect(items[0]).toMatchObject({
       type: 'custom_tool_call',
       call_id: 'call-1',
-      custom_field: 'val',
+      input: 'val',
     });
   });
 
   it('round-trips computer_call_output', () => {
-    const item: ResponseOutputItem.ComputerCallOutput = {
+    const item: ResponseComputerToolCallOutputItem = {
       type: 'computer_call_output',
       id: 'cco-1',
       call_id: 'comp-1',
-      output: { type: 'input_text', text: 'screenshot result' },
+      output: { type: 'computer_screenshot', file_id: 'screenshot result' },
       status: 'completed',
     };
 
@@ -157,6 +165,11 @@ describe('ResponseConversionHelper', () => {
       type: 'tool_result',
       id: 'comp-1',
       name: 'computer_call_output',
+      result: JSON.stringify({
+        id: 'cco-1',
+        output: { type: 'computer_screenshot', file_id: 'screenshot result' },
+        status: 'completed',
+      }),
       providerSpecific: 'response',
     });
   });
@@ -167,9 +180,11 @@ describe('ResponseConversionHelper', () => {
     const item = {
       type: 'mcp_call',
       id: 'mcp-1',
+      name: 'mcp_call',
       server_label: 'github',
       tool_name: 'search_issues',
       arguments: '{"q":"bug"}',
+      status: 'completed',
     } as ResponseOutputItem.McpCall;
 
     const parts = ResponseConversionHelper.toContentParts(item);
@@ -199,7 +214,8 @@ describe('ResponseConversionHelper', () => {
       type: 'file_search_call',
       id: 'fs-1',
       queries: ['search term'],
-    } as ResponseOutputItem.FileSearchCall;
+      status: 'completed',
+    } as ResponseFileSearchToolCall;
 
     const parts = ResponseConversionHelper.toContentParts(item);
     expect(parts[0]).toMatchObject({
@@ -213,8 +229,9 @@ describe('ResponseConversionHelper', () => {
     const item = {
       type: 'web_search_call',
       id: 'ws-1',
-      query: 'search query',
-    } as ResponseOutputItem.WebSearchCall;
+      action: { type: 'search', query: 'search query' },
+      status: 'completed',
+    } as ResponseFunctionWebSearch;
 
     const parts = ResponseConversionHelper.toContentParts(item);
     expect(parts[0]).toMatchObject({
@@ -268,8 +285,10 @@ describe('ResponseConversionHelper', () => {
 
     // Session → Response preserves url_citation
     const items = ResponseConversionHelper.toResponseItems('assistant', parts);
-    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> };
-    const outputText = msg.content[0] as Record<string, unknown>;
+    const msg = items.find((i) => i && typeof i === 'object' && 'type' in i && i.type === 'message') as
+      | { type: 'message'; content: Array<Record<string, unknown>> }
+      | undefined;
+    const outputText = (msg?.content[0] ?? {}) as Record<string, unknown>;
     expect(outputText.annotations).toMatchObject([
       { type: 'url_citation', url: 'https://docs.example.com' },
     ]);
@@ -293,7 +312,10 @@ describe('ResponseConversionHelper', () => {
     };
 
     const parts = ResponseConversionHelper.toContentParts(item);
-    expect(parts[0].citations).toMatchObject([
+    const textPart = parts.find((part) => part && typeof part === 'object' && 'type' in part && part.type === 'text') as
+      | { type: 'text'; text: string; citations?: Array<Record<string, unknown>> }
+      | undefined;
+    expect(textPart?.citations).toMatchObject([
       { type: 'file_location', fileId: 'f1', fileName: 'test.ts' },
     ]);
   });
@@ -353,20 +375,20 @@ describe('ResponseConversionHelper', () => {
   });
 
   it('converts tool result with providerSpecific RESPONSE marker', () => {
-    const sessionMsg: { messageId: string; type: 'session_message'; role: 'tool'; content: Array<Record<string, unknown>> } = {
+    const sessionMsg = {
       messageId: 'tr-ps',
-      type: 'session_message',
-      role: 'tool',
+      type: 'session_message' as const,
+      role: 'tool' as const,
       content: [
         {
-          type: 'tool_result',
+          type: 'tool_result' as const,
           id: 'comp-1',
           name: 'computer_call_output',
           result: JSON.stringify({ output: { type: 'input_text', text: 'screen' }, status: 'completed' }),
-          providerSpecific: 'response',
+          providerSpecific: ApiModes.RESPONSE,
         },
       ],
-    };
+    } satisfies Parameters<typeof ResponseConversionHelper.toResponseInputItems>[0];
 
     const items = ResponseConversionHelper.toResponseInputItems(sessionMsg);
     expect(items[0]).toMatchObject({
@@ -432,7 +454,7 @@ describe('ResponseConversionHelper', () => {
           type: 'server_tool_use',
           name: 'anthropic_tool',
           data: '{"key":"val"}',
-          providerSpecific: 'anthropic',
+          providerSpecific: ApiModes.ANTHROPIC,
         },
       ],
     });
@@ -460,7 +482,7 @@ describe('ResponseConversionHelper', () => {
           type: 'server_tool_use',
           name: 'anthropic_tool',
           data: '{"key":"val"}',
-          providerSpecific: 'anthropic',
+          providerSpecific: ApiModes.ANTHROPIC,
         },
       ],
     });
@@ -492,9 +514,9 @@ describe('ResponseConversionHelper', () => {
       ],
     });
 
-    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> };
+    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> } | undefined;
     expect(msg).toBeTruthy();
-    const outputText = msg.content[0];
+    const outputText = msg!.content[0];
     expect(outputText.type).toBe('output_text');
     expect(outputText.text).toContain('"fileId":"f-doc"');
   });
@@ -509,10 +531,10 @@ describe('ResponseConversionHelper', () => {
       ],
     });
 
-    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> };
+    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> } | undefined;
     expect(msg).toBeTruthy();
-    expect(msg.content[0]).toMatchObject({ type: 'output_text' });
-    expect(msg.content[0].text).toContain('"data":"AAAA"');
+    expect(msg!.content[0]).toMatchObject({ type: 'output_text' });
+    expect(msg!.content[0].text).toContain('"data":"AAAA"');
   });
 
   it('demotes video to output_text in assistant', () => {
@@ -525,10 +547,10 @@ describe('ResponseConversionHelper', () => {
       ],
     });
 
-    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> };
+    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> } | undefined;
     expect(msg).toBeTruthy();
-    expect(msg.content[0]).toMatchObject({ type: 'output_text' });
-    expect(msg.content[0].text).toContain('"url":"https://example.com/v.mp4"');
+    expect(msg!.content[0]).toMatchObject({ type: 'output_text' });
+    expect(msg!.content[0].text).toContain('"url":"https://example.com/v.mp4"');
   });
 
   // ── media fallback to text (user/tool input) ────────────────────────────
@@ -543,9 +565,10 @@ describe('ResponseConversionHelper', () => {
       ],
     });
 
-    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> };
-    expect(msg.content[0]).toMatchObject({ type: 'input_text' });
-    expect(msg.content[0].text).toContain('"mimeType":"audio/mp3"');
+    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> } | undefined;
+    expect(msg).toBeTruthy();
+    expect(msg!.content[0]).toMatchObject({ type: 'input_text' });
+    expect(msg!.content[0].text).toContain('"mimeType":"audio/mp3"');
   });
 
   it('demotes video to input_text in user input', () => {
@@ -558,7 +581,8 @@ describe('ResponseConversionHelper', () => {
       ],
     });
 
-    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> };
-    expect(msg.content[0]).toMatchObject({ type: 'input_text' });
-    expect(msg.content[0].text).toContain('"url":"https://example.com/v.mp4"');
+    const msg = items.find((i) => i.type === 'message') as { content: Array<Record<string, unknown>> } | undefined;
+    expect(msg).toBeTruthy();
+    expect(msg!.content[0]).toMatchObject({ type: 'input_text' });
+    expect(msg!.content[0].text).toContain('"url":"https://example.com/v.mp4"');
   });});

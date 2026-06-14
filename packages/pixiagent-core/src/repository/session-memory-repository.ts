@@ -131,7 +131,13 @@ export class SessionMemoryRepository implements SessionRepository {
     threadInfo: Omit<
       SessionThreadInfo,
       'rootMessageId' | 'headMessageId' | 'forkedFromMessageId' | 'createdAt'
-    > & { threadId: string; headMessageId: string },
+    > & {
+      threadId: string;
+      rootMessageId?: never;
+      headMessageId?: never;
+      forkedFromMessageId?: never;
+      createdAt?: never;
+    },
   ): Promise<void> {
     const session = this.getSessionOrThrow(sessionId);
     const thread = session.threads.find((t) => t.threadId === threadInfo.threadId);

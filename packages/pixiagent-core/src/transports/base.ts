@@ -365,7 +365,6 @@ export interface StreamCallbacks {
     contentPartChunk: ContentPart;
     chunkIndex: number;
   }) => Promise<void>;
-
   onFinish: (msg: SessionMessage) => Promise<void>;
 }
 

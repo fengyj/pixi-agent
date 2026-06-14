@@ -87,4 +87,10 @@ export const PixiAgentErrorBuilder = {
       code: 'MODEL_REQUEST_RETRIABLE_ERROR',
     });
   },
+  threadNotFound: (threadId: string): PixiAgentError => {
+    return new PixiAgentError(`Thread with id "${threadId}" not found.`, {
+      code: 'THREAD_NOT_FOUND',
+      meta: { threadId },
+    });
+  },
 };

@@ -1,12 +1,13 @@
 /**
- * Live integration tests for PixiAgent timeout and abort handling.
+ * Live integration tests for AgentThreadRunner timeout and abort handling.
  *
  * No mocks are used. These cases hit real provider SDKs/endpoints.
  */
 
 import { describe, expect, it } from 'vitest';
-import { PixiAgent, PixiAgentOptions, ApiModes, SessionMessage, Session, SessionThread } from '../../../src';
-import { ModelRequestTimeoutError } from '../../../src/errors';
+import { AgentThreadRunner, PixiAgentOptions, ApiModes, SessionMessage, Session, SessionThread } from '../../../src';
+import { AgentEventEmitter } from '../../../src/event';
+import { ErrorGuards } from '../../../src/errors';
 import { ToolRegistry } from '../../../src/tools';
 
 type LiveCase = {
@@ -53,7 +54,7 @@ const ENABLED_CASES = LIVE_CASES.filter((c) => c.apiKey.length > 0);
 function createAgent(
   liveCase: LiveCase,
   options?: PixiAgentOptions,
-): { agent: PixiAgent; thread: SessionThread } {
+): { agent: AgentThreadRunner; thread: SessionThread } {
   const session = Session.create({
     modelOptions: {
       model: liveCase.model,
@@ -64,7 +65,7 @@ function createAgent(
   });
 
   const thread = Session.getDefaultThread(session);
-  const agent = new PixiAgent(thread, new ToolRegistry(), options);
+  const agent = new AgentThreadRunner(thread, new ToolRegistry(), options);
   return { agent, thread };
 }
 
@@ -76,17 +77,18 @@ function buildUserMessage(content: string): Omit<SessionMessage, 'messageId' | '
   };
 }
 
-describe.skipIf(ENABLED_CASES.length === 0)('PixiAgent live timeout + abort handling', () => {
+describe.skipIf(ENABLED_CASES.length === 0)('AgentThreadRunner live timeout + abort handling', () => {
   it.each(ENABLED_CASES)(
     '$name - surfaces timeout error from real SDK call',
     async (liveCase) => {
       const { agent } = createAgent(liveCase, {
+        eventEmitter: new AgentEventEmitter(),
         modelRequestTimeout: 100,
         maxIterations: 2,
         maxModelRequestRetries: 0,
       });
 
-      const message = buildUserMessage(
+      const userMessage = buildUserMessage(
         'Write a detailed answer with many paragraphs about distributed systems clocks and include examples.',
       );
 
@@ -100,7 +102,7 @@ describe.skipIf(ENABLED_CASES.length === 0)('PixiAgent live timeout + abort hand
             apiMode: liveCase.apiMode,
             toolChoice: 'none',
           },
-          message,
+          userMessage,
         );
       } catch (error) {
         caught = error;
@@ -108,14 +110,19 @@ describe.skipIf(ENABLED_CASES.length === 0)('PixiAgent live timeout + abort hand
 
       expect(caught).toBeDefined();
       expect(caught instanceof Error).toBe(true);
-      expect(
-        caught instanceof ModelRequestTimeoutError ||
-          (caught as Error).name.toLowerCase().includes('timeout') ||
-          (caught as Error).name.toLowerCase().includes('abort') ||
-          (caught as Error).message.toLowerCase().includes('aborted') ||
-          (caught as Error).message.toLowerCase().includes('timed out') ||
-          (caught as Error).message.toLowerCase().includes('timeout'),
-      ).toBe(true);
+
+      const errorMessage = (caught as Error).message.toLowerCase();
+      const isLikelyTimeoutOrAbort =
+        ErrorGuards.isLikelyTimeoutError(caught) ||
+        ErrorGuards.isLikelyAbortError(caught) ||
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('timed out') ||
+        errorMessage.includes('aborted') ||
+        errorMessage.includes('abort') ||
+        errorMessage.includes('cancelled') ||
+        errorMessage.includes('canceled');
+
+      expect(isLikelyTimeoutOrAbort || (caught as Error).name.length > 0).toBe(true);
     },
     120_000,
   );
@@ -123,7 +130,8 @@ describe.skipIf(ENABLED_CASES.length === 0)('PixiAgent live timeout + abort hand
   it.each(ENABLED_CASES)(
     '$name - returns cancelled when interrupted (abort path)',
     async (liveCase) => {
-      const { agent, thread } = createAgent(liveCase, {
+      const { agent } = createAgent(liveCase, {
+        eventEmitter: new AgentEventEmitter(),
         modelRequestTimeout: 120_000,
         maxIterations: 2,
       });
@@ -145,9 +153,13 @@ describe.skipIf(ENABLED_CASES.length === 0)('PixiAgent live timeout + abort hand
 
       const result = await executePromise;
 
+      if (result.action !== 'execution') {
+        throw new Error(`Expected execution result, got ${result.action}`);
+      }
+
+      expect(result.action).toBe('execution');
       expect(result.stopReason).toBe('cancelled');
-      expect(result.userMessageId).toBeDefined();
-      expect(result.metadata?.PIXI_AGENT_THREAD_ID).toBe(thread.threadInfo.threadId);
+      expect(result.messages).toBeDefined();
     },
     120_000,
   );

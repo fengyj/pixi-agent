@@ -5,6 +5,8 @@ export * as Observation from './observation';
 export * as Utils from './utils';
 
 export * from './agent';
+export * from './agent-thread-runner';
+export * from './agent-loop';
 export * from './message';
 export * from './model';
 export * from './session';

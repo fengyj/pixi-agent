@@ -57,7 +57,10 @@ export interface SessionRepository {
    * @param session
    */
   update(
-    session: Partial<Omit<Session, 'sessionId' | 'createdAt'>> & { sessionId: string },
+    session: Partial<Omit<Session, 'sessionId' | 'createdAt'>> & {
+      sessionId: string;
+      createdAt?: never;
+    },
   ): Promise<void>;
 
   /**
@@ -80,14 +83,6 @@ export interface SessionRepository {
 
   /**
    * Updates a thread of the session in the repository.
-   * Or deletes messages by setting the headMessageId to a previous messageId.
-   *
-   * When using setting the headMessageId to delete messages, the following rules which are not handled
-   * by this function, but should be followed:
-   *
-   * If a message is deleted, the threads folked from or after the message, should be deleted as well.
-   * In another word, the headMessageId shouldn't be the id of the message which is before or equal
-   * the forkedFromMessageId of the thread. If so, should use deleteThread instead.
    *
    * @param sessionId
    * @param threadInfo
@@ -97,18 +92,24 @@ export interface SessionRepository {
     threadInfo: Omit<
       SessionThreadInfo,
       'rootMessageId' | 'headMessageId' | 'forkedFromMessageId' | 'createdAt'
-    > & { threadId: string; headMessageId: string },
+    > & {
+      threadId: string;
+      rootMessageId?: never;
+      headMessageId?: never;
+      forkedFromMessageId?: never;
+      createdAt?: never;
+    },
   ): Promise<void>;
 
   /**
    * Resets the headMessageId of a thread in the repository.
-   * 
+   *
    * This function is used to "delete" the messages created after the message of the headMessageId,
    * and the threads which are forked from those messages.
-   * @param sessionId 
-   * @param threadId 
-   * @param headMessageId 
-   * @param threadsToDelete 
+   * @param sessionId
+   * @param threadId
+   * @param headMessageId
+   * @param threadsToDelete
    */
   resetThreadHeadMessageId(
     sessionId: string,
@@ -168,11 +169,15 @@ export interface SessionRepository {
   patchWithNewMessage(
     sessionInfo: Partial<Omit<Session, 'sessionId' | 'messages' | 'threads'>> & {
       sessionId: string;
+      messages?: never;
+      threads?: never;
     },
     threadInfo: Partial<
       Omit<SessionThreadInfo, 'rootMessageId' | 'createdAt'> & {
         threadId: string;
         headMessageId: string;
+        rootMessageId?: never;
+        createdAt?: never;
       }
     >,
     message: InternalMessage,
